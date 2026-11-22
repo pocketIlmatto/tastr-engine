@@ -30,6 +30,10 @@ const PULSE_SCALE: f64 = 4.0;
 /// `refine_period` searches periods within this fraction of the beat grid's, in steps of REFINE_STEP of it.
 const REFINE_SPAN: f64 = 0.025;
 const REFINE_STEP: f64 = 0.0002;
+/// How far (in beats) a tracked beat may sit from the beat or the off-beat for `one_phase`.
+const ONE_PHASE_TOLERANCE: f64 = 0.12;
+/// The share of tracked beats that must sit on one of the two phases.
+const ONE_PHASE_SHARE: f64 = 0.9;
 const METER_CUE_SCALES: [(&str, f64); 6] =
     [("timbre_lag", 0.1), ("bass_lag", 0.27), ("kick", 0.3), ("snare", 0.25), ("change", 0.17), ("bass_change", 0.22)];
 pub const METER_THRESHOLD: f64 = 1.0;
@@ -192,7 +196,8 @@ pub(crate) fn tempo_and_beats(ctx: &mut Ctx, n_frames: usize) -> (Option<f64>, V
     let Ctx { onset, low_flux, tempogram, log_mel, log_mel_freqs, mel_perc, mel_perc_freqs, air_flux, sr, .. } = ctx;
     let meter_of = |frames: &[f64]| meter_score(&beat_index(frames, n_frames), log_mel, log_mel_freqs, None);
     let backbeat_of = |frames: &[f64]| fast_backbeat(frames, &mid_drum_hits(mel_perc, mel_perc_freqs, air_flux));
-    tempo_from_envelopes(onset, low_flux, *sr, n_frames, tempogram, &meter_of, &backbeat_of)
+    let constant = ctx.grid_mode == crate::grid::GridMode::Constant;
+    tempo_from_envelopes(onset, low_flux, *sr, n_frames, tempogram, &meter_of, &backbeat_of, constant)
 }
 
 /// The drum part between kick and hats (snare, clap, perc) as an onset strength per frame of `mel`, a
@@ -232,6 +237,7 @@ pub fn fast_backbeat(beats: &[f64], mid: &[f32]) -> (f64, f64) {
 /// beat grid in those frames (the 1.5x switch is skipped when the faster beats group in 3s), and
 /// `backbeat_of`, `fast_backbeat` of a beat grid in those frames (it decides the drum & bass doubling). The
 /// spectrogram benchmarks call it on envelopes rebuilt from a log-mel spectrogram (bench.rs).
+#[allow(clippy::too_many_arguments)]
 pub fn tempo_from_envelopes(
     onset: &[f32],
     low_flux: &[f32],
@@ -240,6 +246,7 @@ pub fn tempo_from_envelopes(
     tempogram: &mut Option<Vec<f64>>,
     meter_of: &dyn Fn(&[f64]) -> f64,
     backbeat_of: &dyn Fn(&[f64]) -> (f64, f64),
+    constant: bool,
 ) -> (Option<f64>, Vec<f64>, f64, f64, f64) {
     let hop = HOP as f64;
     let max = onset.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -254,6 +261,8 @@ pub fn tempo_from_envelopes(
     let ibis: Vec<f64> = diffs(&frames).iter().map(|d| d * hop / sr).collect();
     let stability = if ibis.is_empty() { 0.0 } else { clip(1.0 - std(&ibis) / (mean(&ibis) + 1e-9) * 4.0, 0.0, 1.0) };
     let frames = regularize(&frames, n_frames);
+    let frames =
+        if is_uniform(&frames) { frames } else { one_phase(&frames, onset, n_frames, constant).unwrap_or(frames) };
     let picked: Vec<f32> = beat_index(&frames, n_frames).into_iter().map(|i| onset[i]).collect();
     let ratio = mean_f32(&picked) / (mean_f32(onset) + 1e-9);
     let pulse = clip(((ratio - 1.0) as f64) / PULSE_SCALE, 0.0, 1.0);
@@ -459,12 +468,56 @@ fn regularize(frames: &[f64], n_frames: usize) -> Vec<f64> {
     let (period, offset) = polyfit1(&k, frames);
     let worst =
         frames.iter().zip(&k).map(|(f, kk)| (f - (offset + period * kk)).abs()).fold(f64::NEG_INFINITY, f64::max);
-    if period <= 0.0 || worst > 0.2 * period {
-        return frames.to_vec();
+    if period > 0.0 && worst <= 0.2 * period {
+        return even_grid(offset, period, n_frames);
     }
+    frames.to_vec()
+}
+
+/// Beats at `offset + period * i` from the first at or after frame 0 to the last frame.
+fn even_grid(offset: f64, period: f64, n_frames: usize) -> Vec<f64> {
     let first = libm::ceil(-offset / period - 1e-9) as i64;
     let last = libm::floor((n_frames as f64 - 1.0 - offset) / period) as i64;
     (first..=last).map(|i| offset + period * i as f64).collect()
+}
+
+/// A steady tempo whose tracked beats drift onto the off-beat for a stretch and back (the tracker follows an
+/// off-beat bass or hi-hat): measured against an even grid at the whole envelope's beat period (`refine_period`),
+/// nearly every beat sits on one phase or half a beat from it. Then one even grid on the phase most beats share
+/// (`align_to_kick` may still move it onto the kick). None when the beats wander off both phases (a tempo that
+/// really changes, a live drummer) or never leave the main one.
+fn one_phase(frames: &[f64], onset: &[f32], n_frames: usize, constant: bool) -> Option<Vec<f64>> {
+    if frames.len() < MIN_BEATS {
+        return None;
+    }
+    let period = refine_period(onset, beat_period(frames));
+    if period.is_nan() || period <= 1.0 {
+        return None;
+    }
+    let tau = 2.0 * core::f64::consts::PI;
+    // Phase in beats, 0..1, against a grid through frame 0; doubled angles map both phases to one direction.
+    let phases: Vec<f64> = frames.iter().map(|f| (f / period).rem_euclid(1.0)).collect();
+    let (c, s) =
+        phases.iter().fold((0.0, 0.0), |a, p| (a.0 + libm::cos(2.0 * tau * p), a.1 + libm::sin(2.0 * tau * p)));
+    let base = (libm::atan2(s, c) / (2.0 * tau)).rem_euclid(0.5);
+    let dist = |p: f64, centre: f64| {
+        let d = (p - centre).rem_euclid(1.0);
+        d.min(1.0 - d)
+    };
+    let (mut on, mut off) = (0usize, 0usize);
+    for &p in &phases {
+        if dist(p, base) <= ONE_PHASE_TOLERANCE {
+            on += 1;
+        } else if dist(p, base + 0.5) <= ONE_PHASE_TOLERANCE {
+            off += 1;
+        }
+    }
+    let n = frames.len();
+    if !constant && (((on + off) as f64) < ONE_PHASE_SHARE * n as f64 || on.min(off) == 0) {
+        return None;
+    }
+    let phase = if on >= off { base } else { base + 0.5 };
+    Some(even_grid(phase * period, period, n_frames))
 }
 
 /// _align_to_kick: slide the grid onto the kick when the kick evidence is clearly stronger elsewhere.
@@ -824,6 +877,55 @@ mod tests {
         assert!((refine_period(&onset, true_period) - true_period).abs() < 0.01);
         assert_eq!(refine_period(&vec![0.5f32; 5200], 21.0), 21.0);
         assert!((refine_period(&onset, 25.0) / 25.0 - 1.0).abs() <= REFINE_SPAN + 1e-9);
+    }
+
+    /// An onset envelope with a kick every `period` frames from frame 3, `n` frames long.
+    fn kicks(period: f64, n: usize) -> Vec<f32> {
+        let mut onset = vec![0.01f32; n];
+        let mut t = 3.0;
+        while (libm::round(t) as usize) < n {
+            onset[libm::round(t) as usize] = 1.0;
+            t += period;
+        }
+        onset
+    }
+
+    #[test]
+    fn one_phase_undoes_a_stretch_on_the_off_beat() {
+        // 120 BPM (21.533 frames a beat): the tracker drifts onto the off-beat over 8 beats at beat 100, stays
+        // there for 80 beats, then drifts back. (When most beats are on the off-beat, this picks the off-beat and
+        // `align_to_kick` moves the grid onto the kick.)
+        let p = 21.533;
+        let onset = kicks(p, 6000);
+        let frames: Vec<f64> = (0..275)
+            .map(|k| {
+                let k = k as f64;
+                let shift = ((k - 100.0) / 8.0).clamp(0.0, 1.0) - ((k - 180.0) / 8.0).clamp(0.0, 1.0);
+                libm::round(3.0 + p * (k + 0.5 * shift))
+            })
+            .collect();
+        assert!(!is_uniform(&regularize(&frames, 6000)));
+        let even = one_phase(&frames, &onset, 6000, false).expect("one phase");
+        assert!(is_uniform(&even));
+        for f in &even {
+            let off = ((f - 3.0) / p).rem_euclid(1.0);
+            assert!(off.min(1.0 - off) < 0.02, "beat at {f} is {off} of a beat off");
+        }
+    }
+
+    #[test]
+    fn one_phase_leaves_a_real_tempo_change_alone() {
+        // 120 BPM for 120 beats, then 126 BPM: the beats wander off both phases of any one tempo.
+        let onset = kicks(21.533, 6000);
+        let mut frames = Vec::new();
+        let mut t = 3.0;
+        for k in 0..250 {
+            frames.push(libm::round(t));
+            t += if k < 120 { 21.533 } else { 20.508 };
+        }
+        assert_eq!(one_phase(&frames, &onset, 6000, false), None);
+        // GridMode::Constant lays one grid over it anyway.
+        assert!(is_uniform(&one_phase(&frames, &onset, 6000, true).expect("constant")));
     }
 
     #[test]

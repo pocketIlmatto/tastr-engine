@@ -43,6 +43,8 @@ pub struct Ctx {
     pub model_open_hats: bool,
     /// Caller's meter (3 or 4) instead of detecting it.
     pub beats_per_bar: Option<i64>,
+    /// `GridMode::Constant` lays the beats on one even grid for the whole track (core stage).
+    pub grid_mode: crate::grid::GridMode,
 }
 
 impl Ctx {
@@ -103,6 +105,7 @@ impl Ctx {
             drum_hits: None,
             model_open_hats: crate::drums::MODEL_OPEN_HATS,
             beats_per_bar,
+            grid_mode: Default::default(),
             y,
         }
     }
@@ -112,7 +115,7 @@ type StageFn = fn(&mut Ctx, &mut Card) -> Result<(), String>;
 
 /// The stages in run order: (name, version, required stages, run).
 const STAGES: [(&str, &str, &[&str], StageFn); 5] = [
-    ("core", "0.7.0", &[], core::run),
+    ("core", "0.8.0", &[], core::run),
     ("sections", "0.2.0", &["core"], sections::run),
     ("tags", "0.2.0", &["core", "sections"], tags::run),
     ("suggestions", "0.5.0", &["core", "sections", "tags"], suggestions::run),

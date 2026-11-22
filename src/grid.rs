@@ -36,8 +36,24 @@ const NEIGHBOURS: usize = 8;
 const MIN_JITTER_S: f64 = 0.001;
 const MIN_SEGMENT: usize = 16;
 const MAX_ANCHORS: usize = 16;
+/// Beats this close (seconds) to an even spacing came from the core stage's even grid (it rounds to 1 ms).
+const EVEN_S: f64 = 0.0015;
+/// Over even beats, one line replaces the anchors when they never stray further than this from it (seconds).
+const STEADY_MAX_S: f64 = 0.04;
 /// Too few attacks to trust a grid.
 const MIN_POINTS: usize = 8;
+
+/// How the grid treats the tempo.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GridMode {
+    /// One tempo and one beat phase for a track whose tempo holds steady, an anchor wherever it really changes.
+    #[default]
+    Auto,
+    /// One tempo and one beat phase for the whole track, whatever the tracker found: for music made to a click
+    /// (most electronic music, even recorded live), like a DJ program's "normal" analysis.
+    Constant,
+}
 
 /// Where the grid starts a (new) tempo.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,8 +84,8 @@ pub struct Grid {
 }
 
 /// A grid from mono audio `y` at `sr` Hz and the tracker's beats and downbeats (seconds). None when there are
-/// too few clear attacks.
-pub fn fit(y: &[f32], sr: f64, beats: &[f64], downbeats: &[f64], beats_per_bar: i64) -> Option<Grid> {
+/// too few clear attacks. `GridMode::Constant` always fits one line.
+pub fn fit(y: &[f32], sr: f64, beats: &[f64], downbeats: &[f64], beats_per_bar: i64, mode: GridMode) -> Option<Grid> {
     if beats.len() < MIN_POINTS || y.is_empty() || sr <= 0.0 {
         return None;
     }
@@ -93,8 +109,27 @@ pub fn fit(y: &[f32], sr: f64, beats: &[f64], downbeats: &[f64], beats_per_bar: 
         return None;
     }
     let mut segments = Vec::new();
-    segment(&points, period, &mut segments);
+    if mode == GridMode::Constant {
+        segments.push(fit_line(&points, period));
+    } else {
+        segment(&points, period, &mut segments);
+    }
     segments.sort_by(|a, b| a.k0.total_cmp(&b.k0));
+    // The core stage found a steady tempo and laid its beats on an even grid: one line, one tempo, unless the
+    // anchors drift away from it (a live band the core stage still called steady).
+    if segments.len() > 1 && is_even(beats) {
+        let line = fit_line(&points, period);
+        let apart = points
+            .iter()
+            .map(|p| {
+                let s = segments.iter().rev().find(|s| s.k0 <= p.0).unwrap_or(&segments[0]);
+                (s.at(p.0) - line.at(p.0)).abs()
+            })
+            .fold(0.0, f64::max);
+        if apart <= STEADY_MAX_S {
+            segments = vec![line];
+        }
+    }
     let first = &segments[0];
     // Carry the first segment's line back to the earliest beat at or after 0 s.
     let t_first = first.at(first.k0);
@@ -124,6 +159,17 @@ pub fn fit(y: &[f32], sr: f64, beats: &[f64], downbeats: &[f64], beats_per_bar: 
         fit_ms: round_dec(1000.0 * libm::sqrt(sse / w.max(1e-12)), 2),
         beats_used: segments.iter().map(|s| s.used).sum(),
     })
+}
+
+/// Whether the beats are an even grid (the core stage's beats for a steady track, rounded to milliseconds); the
+/// first may be clamped to 0 s, so it doesn't count.
+fn is_even(beats: &[f64]) -> bool {
+    let gaps: Vec<f64> = beats.windows(2).skip(1).map(|w| w[1] - w[0]).collect();
+    if gaps.len() < MIN_POINTS {
+        return false;
+    }
+    let med = crate::np::median(&gaps);
+    gaps.iter().all(|g| (g - med).abs() <= EVEN_S)
 }
 
 /// Each beat's count from the first, stepping beat to beat by the local beat length (the median gap of the
@@ -472,6 +518,7 @@ mod tests {
                 &coarse(&starts, 0.02),
                 &coarse(&starts[2..], 0.02).iter().step_by(4).cloned().collect::<Vec<_>>(),
                 4,
+                GridMode::Auto,
             )
             .unwrap();
             assert_eq!(g.anchors.len(), 1, "{bpm}: {:?}", g.anchors);
@@ -502,7 +549,7 @@ mod tests {
             starts.push(t);
             t += 60.0 / 126.0;
         }
-        let g = fit(&clicks(&starts, t + 1.0), SR, &coarse(&starts, 0.01), &[], 4).unwrap();
+        let g = fit(&clicks(&starts, t + 1.0), SR, &coarse(&starts, 0.01), &[], 4, GridMode::Auto).unwrap();
         assert_eq!(g.anchors.len(), 2, "{:?}", g.anchors);
         assert!((g.anchors[0].bpm - 120.0).abs() < 0.02 && (g.anchors[1].bpm - 126.0).abs() < 0.02, "{:?}", g.anchors);
         assert!((g.anchors[1].time - change).abs() < 0.6, "{:?} vs {change}", g.anchors);
@@ -518,7 +565,7 @@ mod tests {
             starts.push(t);
             t += 60.0 / (118.0 + 4.0 * k as f64 / 120.0);
         }
-        let g = fit(&clicks(&starts, t + 1.0), SR, &coarse(&starts, 0.01), &[], 4).unwrap();
+        let g = fit(&clicks(&starts, t + 1.0), SR, &coarse(&starts, 0.01), &[], 4, GridMode::Auto).unwrap();
         assert!(g.anchors.len() >= 2, "{g:?}");
         let mut worst: f64 = 0.0;
         for &s in &starts {
@@ -537,7 +584,7 @@ mod tests {
         let starts: Vec<f64> = (0..200)
             .map(|k| 0.3 + k as f64 * p + 0.008 * libm::sin(k as f64 * 7.31 + libm::sin(k as f64 * 1.7)))
             .collect();
-        let g = fit(&clicks(&starts, starts[199] + 1.0), SR, &coarse(&starts, 0.01), &[], 4).unwrap();
+        let g = fit(&clicks(&starts, starts[199] + 1.0), SR, &coarse(&starts, 0.01), &[], 4, GridMode::Auto).unwrap();
         assert!(g.anchors.len() <= 2, "{:?}", g.anchors);
         assert!((g.bpm - 125.0).abs() < 0.05 && (g.first_beat - 0.3).abs() < 0.004, "{g:?}");
     }
@@ -550,18 +597,54 @@ mod tests {
         let kept: Vec<f64> = starts.iter().enumerate().filter(|(i, _)| i % 5 != 0).map(|(_, &t)| t).collect();
         let mut audio = kept.clone();
         audio.extend(starts.iter().step_by(4).map(|t| t + 0.5 * p));
-        let g = fit(&clicks(&audio, 54.0), SR, &coarse(&starts, 0.015), &[], 4).unwrap();
+        let g = fit(&clicks(&audio, 54.0), SR, &coarse(&starts, 0.015), &[], 4, GridMode::Auto).unwrap();
         assert_eq!(g.anchors.len(), 1);
         assert!((g.bpm - 125.0).abs() < 0.01 && (g.first_beat - 0.3).abs() < 0.002, "{g:?}");
     }
 
     #[test]
+    fn even_beats_keep_one_anchor_through_small_wobbles() {
+        // 120 BPM whose attacks wobble +-6 ms in slow waves (a mastered track, an encoder): the beats from the
+        // core stage are already even, so one line, not an anchor per wave.
+        let p = 0.5;
+        let starts: Vec<f64> = (0..400).map(|k| 0.2 + k as f64 * p + 0.006 * libm::sin(k as f64 * 0.05)).collect();
+        let beats: Vec<f64> = (0..400).map(|k| crate::np::round_dec(0.2 + k as f64 * p - 0.015, 3)).collect();
+        let audio = clicks(&starts, 201.0);
+        let auto = fit(&audio, SR, &beats, &[], 4, GridMode::Auto).unwrap();
+        assert_eq!(auto.anchors.len(), 1, "{:?}", auto.anchors);
+        assert!((auto.bpm - 120.0).abs() < 0.01, "{auto:?}");
+        // Uneven beats (the tracker's own) over the same attacks may split, but stay within a few ms.
+        let uneven: Vec<f64> = starts.iter().map(|t| libm::round((t - 0.015) / (512.0 / SR)) * 512.0 / SR).collect();
+        assert!(!is_even(&uneven));
+    }
+
+    #[test]
+    fn constant_mode_keeps_one_anchor_through_a_tempo_change() {
+        let mut starts = Vec::new();
+        let mut t = 0.5;
+        for k in 0..192 {
+            starts.push(t);
+            t += 60.0 / if k < 96 { 120.0 } else { 121.0 };
+        }
+        let g = fit(&clicks(&starts, t + 1.0), SR, &coarse(&starts, 0.01), &[], 4, GridMode::Constant).unwrap();
+        assert_eq!(g.anchors.len(), 1, "{:?}", g.anchors);
+        assert!((g.bpm - 120.5).abs() < 0.3, "{g:?}");
+    }
+
+    #[test]
     fn silence_or_too_few_beats_has_no_grid() {
         assert_eq!(
-            fit(&vec![0.0; 22_050 * 10], SR, &(0..20).map(|k| k as f64 * 0.5).collect::<Vec<_>>(), &[], 4),
+            fit(
+                &vec![0.0; 22_050 * 10],
+                SR,
+                &(0..20).map(|k| k as f64 * 0.5).collect::<Vec<_>>(),
+                &[],
+                4,
+                GridMode::Auto
+            ),
             None
         );
-        assert_eq!(fit(&clicks(&[0.5, 1.0], 3.0), SR, &[0.5, 1.0], &[], 4), None);
+        assert_eq!(fit(&clicks(&[0.5, 1.0], 3.0), SR, &[0.5, 1.0], &[], 4, GridMode::Auto), None);
     }
 
     #[test]
