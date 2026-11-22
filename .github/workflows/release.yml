@@ -1,9 +1,14 @@
 name: release
 # Builds the `tastr-engine` command-line program for macOS on Apple silicon, Linux on x86-64 and
 # Linux on ARM, so people who don't build Rust can run `tastr-engine dj song.mp3` (docs/ci.md#release).
+# It also builds the engine as a library for programs that load it (`libtastr_engine` .so / .dylib, through the
+# C interface in src/lib.rs) and as WebAssembly for the browser, so they can download a release instead of
+# compiling Rust.
 # On a pushed tag `v<version>` it checks the tag matches Cargo.toml, builds, publishes the crate
-# to crates.io, and attaches the archives and their SHA-256 sums to a GitHub release for that tag. Actions > release > Run workflow builds
-# the chosen branch and keeps the archives as a workflow artifact for a week, with no release.
+# to crates.io, and attaches the archives, the libraries, the WebAssembly file and their SHA-256 sums to a GitHub
+# release for that tag. Actions > release > Run workflow builds the chosen branch and keeps the files as a
+# workflow artifact for a week, with no release; given a tag that already has a release, it builds that tag and
+# adds the libraries and the WebAssembly file to the release instead (for releases made before they were built).
 # Linux builds run on Ubuntu 22.04 so the programs need only glibc 2.35 or newer. The release is made with the
 # workflow's own GITHUB_TOKEN; publishing needs the repository secret CARGO_REGISTRY_TOKEN (docs/ci.md#secrets).
 # A crates.io version can't be replaced (only yanked), so a tag publishes once.
@@ -11,11 +16,19 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release's tag (v1.2.3) to add the libraries and WebAssembly file to; empty builds the branch
+        type: string
+        required: false
+        default: ""
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}-${{ inputs.tag }}
   cancel-in-progress: false
 permissions:
   contents: read
+env:
+  TAG: ${{ inputs.tag }}
 jobs:
   build:
     strategy:
@@ -25,22 +38,34 @@ jobs:
           - os: macos-15
             target: aarch64-apple-darwin
             name: macos-arm64
+            lib: libtastr_engine.dylib
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             name: linux-x86_64
+            lib: libtastr_engine.so
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             name: linux-arm64
+            lib: libtastr_engine.so
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
+      - name: Check the tag input
+        if: env.TAG != ''
+        run: |
+          if ! echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::tag must look like v1.2.3"; exit 1
+          fi
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Check the tag matches the crate version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || env.TAG != ''
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [ "v$version" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} doesn't match Cargo.toml version $version"
+          tag="${TAG:-$GITHUB_REF_NAME}"
+          if [ "v$version" != "$tag" ]; then
+            echo "::error::tag $tag doesn't match Cargo.toml version $version"
             exit 1
           fi
       - name: Build
@@ -48,6 +73,8 @@ jobs:
           rustup toolchain install 1.97.0 --profile minimal --target ${{ matrix.target }}
           cargo +1.97.0 test --release --locked --lib --target ${{ matrix.target }}
           cargo +1.97.0 build --release --locked --bin tastr-engine --target ${{ matrix.target }}
+          cargo +1.97.0 build --release --locked --lib --target ${{ matrix.target }}
+      # The program as an archive with its notices; the library as a plain file named for the version and platform.
       - name: Package
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -57,18 +84,42 @@ jobs:
           cp LICENSE NOTICE README.md "dist/$dir/"
           status=0; "dist/$dir/tastr-engine" >/dev/null 2>&1 || status=$?
           [ "$status" -eq 2 ]  # it runs here and prints its usage (exit 2) when given nothing
+          lib="${{ matrix.lib }}"
+          cp "target/${{ matrix.target }}/release/$lib" "dist/${lib%%.*}-$version-${{ matrix.name }}.${lib#*.}"
           tar -C dist -czf "dist/$dir.tar.gz" "$dir"
-          cd dist && shasum -a 256 "$dir.tar.gz" > "$dir.tar.gz.sha256"
+          cd dist && for f in "$dir.tar.gz" libtastr_engine-*; do shasum -a 256 "$f" > "$f.sha256"; done
       - uses: actions/upload-artifact@v7
         with:
           name: tastr-engine-${{ matrix.name }}
           path: |
             dist/*.tar.gz
             dist/*.sha256
+            dist/libtastr_engine-*
+          retention-days: 7
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      # The same build the tests check against the native one (docs/rust-engine.md).
+      - name: Build
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --target wasm32-unknown-unknown
+          cargo +1.97.0 build --release --locked --lib --target wasm32-unknown-unknown
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          mkdir dist
+          cp target/wasm32-unknown-unknown/release/tastr_engine.wasm "dist/tastr_engine-$version.wasm"
+          cd dist && shasum -a 256 "tastr_engine-$version.wasm" > "tastr_engine-$version.wasm.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tastr-engine-wasm
+          path: dist/tastr_engine-*
           retention-days: 7
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, wasm]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -85,7 +136,7 @@ jobs:
           cargo +1.97.0 publish --locked
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, publish]
+    needs: [build, wasm, publish]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -100,6 +151,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat dist/*.sha256 > dist/SHA256SUMS
-          gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/SHA256SUMS \
+          rm dist/*.sha256
+          gh release create "${GITHUB_REF_NAME}" dist/* \
             --repo "${GITHUB_REPOSITORY}" --title "Tastr engine ${GITHUB_REF_NAME#v}" \
-            --notes "The \`tastr-engine\` command for macOS (Apple silicon) and Linux (x86-64, ARM). Unpack, then run \`./tastr-engine dj song.mp3\` for BPM, beats, the DJ beat grid, key and sections as JSON. Check downloads against SHA256SUMS. As a Rust library: https://crates.io/crates/tastr-engine. See README.md and NOTICE inside each archive (MIT; the key model's weights are CC BY-SA 4.0)."
+            --notes "The \`tastr-engine\` command for macOS (Apple silicon) and Linux (x86-64, ARM). Unpack, then run \`./tastr-engine dj song.mp3\` for BPM, beats, the DJ beat grid, key and sections as JSON. The \`libtastr_engine\` files are the same engine as a library to load from other programs, and \`tastr_engine-*.wasm\` is its WebAssembly build. Check downloads against SHA256SUMS. As a Rust library: https://crates.io/crates/tastr-engine. See README.md and NOTICE inside each archive (MIT; the key model's weights are CC BY-SA 4.0; audio decoding uses Symphonia, MPL-2.0)."
+  # Run by hand with a tag: add the libraries and the WebAssembly file to that tag's existing release, and their
+  # sums to its SHA256SUMS. The archives already there are left as they are.
+  attach:
+    if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
+    needs: [build, wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Add the files to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          rm -f tastr-engine-*.tar.gz tastr-engine-*.tar.gz.sha256  # the release's own archives stay
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS --dir old
+          files=$(ls libtastr_engine-* tastr_engine-*.wasm | grep -v '\.sha256$')
+          # Keep the sums of files that aren't being replaced, then add the new ones.
+          grep -v -F -f <(printf '  %s\n' $files) old/SHA256SUMS > SHA256SUMS || true
+          cat *.sha256 >> SHA256SUMS
+          gh release upload "$TAG" $files SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
