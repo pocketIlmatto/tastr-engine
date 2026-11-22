@@ -1,0 +1,910 @@
+# Accuracy benchmark
+
+> A method write-up for the engine, kept here because the [engine report](engine-report.md) cites it. The
+> benchmark scripts and `python` commands it names live in the Tastr app, not in this repository.
+
+`tastr bench` runs the engine over tracks with known labels and scores how
+close it gets. Run it before and after any change to the analysis stages, so
+tuning is guided by numbers rather than a few hand-picked tracks.
+
+```
+tastr bench synth                                   # smoke test, no downloads
+tastr bench giantsteps-key ~/data/giantsteps-key --jobs 4 --out key-baseline.json
+tastr bench giantsteps-key ~/data/giantsteps-key --jobs 4 --baseline key-baseline.json
+tastr bench manifest ~/music/labels.csv             # your own tracks
+```
+
+Every track gets the whole Rust card, as in the app; the scores read its core and sections.
+Danceability, energy and vibe tags have their own benchmark, `tastr vibe-bench` ([vibes.md](vibes.md)). MTG's pre-trained Essentia classifiers are scored against the same labels in essentia.md (in the Tastr app's docs).
+`--rekordbox XML` scores Rekordbox's exported analysis of the same tracks next to Tastr's (rekordbox.md (in the Tastr app's docs)).
+`--limit N` takes the first N tracks for a quick check. `--remote` runs it on Modal
+with the datasets in an R2 bucket instead of on this machine (see cloud.md (in the Tastr app's docs)).
+
+### Scores quoted in the app
+
+The Glossary quotes a few headline scores, read from `tastr/engine/bench_scores.json` (served at
+`GET /api/bench`): exact key on `giantsteps-key` and `beatport-key`, BPM within 4% on `beatport-tempo`
+and `giantsteps-tempo`, and bar 1 right on GTZAN downbeats (`downbeat`). Add `--record` to a full
+milestone run to update its entry with the score, track count and today's date:
+
+```
+tastr bench beatport-tempo BP --jobs 8 --record
+tastr spec-bench downbeats GTZAN --record          # dataset gtzan only
+```
+
+`--record` refuses `--limit` (a subset run is never quoted) and datasets the app doesn't quote. Commit
+the changed JSON with the run's write-up.
+
+## What gets scored
+
+| Metric | Meaning |
+|---|---|
+| BPM within 4% (Acc1) | estimate within 4% of the labeled tempo |
+| BPM incl. x2 / half (Acc2) | also counts double, half, triple and third; the gap between Acc1 and Acc2 is octave errors |
+| Key (MIREX weighted) | 1 exact, 0.5 off by a fifth, 0.3 relative major/minor, 0.2 parallel, 0 otherwise |
+| Key exactly right | share of tracks with tonic and mode both right |
+| Beat / downbeat F | beats within 70 ms, ignoring the first 5 s |
+| Tracker / DJ grid F (20 ms, 10 ms) and offset | on datasets with beat labels: the tracker's beats and the DJ grid's beats (`dj.rs`, [Beat grid](#dj-beat-grid)) within 20 and 10 ms, and the median signed offset (ms, estimate minus label) of the beats matched within 70 ms |
+| Sections F (0.5 s / 3 s) | section starts within 0.5 s or 3 s of a labeled one, track start and end excluded |
+| Hand cues with a cue (1 bar) | share of hand-set cue points (Rekordbox hot and memory cues) with a suggested cue within one bar |
+| Cues near a hand cue (1 bar) | share of suggested cue points within one bar of a hand-set one |
+| Section starts with a cue (1 bar) | share of labeled section starts with a section, phrase, drop or mix-out cue within one bar |
+
+Each metric is averaged over the tracks that have that label. The summary also
+counts key results by category (so "relative 140" shows the minor/major
+confusion directly) and BPM octave errors by factor.
+
+The report's `review` list is the tracks most worth a human look: confident
+wrong answers first (they usually point at a systematic bug), then right
+answers the engine was unsure of. Fixing a label or confirming one in that list
+and adding it to your manifest is the cheapest way to grow the labeled set.
+
+## Datasets
+
+Nothing is downloaded by `tastr bench`; fetch each dataset with its own scripts
+and point the command at the folder. Check each dataset's license before
+redistributing its labels or audio.
+
+| Name | Labels | Size | Where |
+|---|---|---|---|
+| `giantsteps-key` | global key | 604 two-minute EDM previews | github.com/GiantSteps/giantsteps-key-dataset for the labels; see "Getting the GiantSteps audio" |
+| `giantsteps-tempo` | global BPM | 664 EDM previews | github.com/GiantSteps/giantsteps-tempo-dataset (uses `annotations_v2` when present) |
+| `beatport-key` | global key | 1,486 two-minute EDM previews (1,275 with a plain major/minor label are scored) | Zenodo record 1101082: unzip `keys.zip` and `audio.zip` into one folder; no overlap with GiantSteps Key |
+| `fma-keys` | global key | 5,489 full Free Music Archive songs, 17 genres, about half major; 695 in the first zip | Zenodo record 10719860, `tastr fetch fma-keys` (cloud.md (in the Tastr app's docs)); labels for non-commercial research |
+| `ballroom` | tempo, beats, downbeats, meter | 698 30 s excerpts of eight ballroom styles; the waltzes are the held-out 3/4 set | mtg.upf.edu + CPJKU/BallroomAnnotations, `tastr fetch ballroom` (cloud.md (in the Tastr app's docs)); labels CC BY-NC-SA 4.0 |
+| `beatport-tempo` | Beatport's listed BPM | 774 of those previews with a bpm in `meta/` | same folder plus `original_metadata.zip` unzipped to `<root>/meta/*.json`; see "Tempo notes" for its drum & bass conventions |
+| `harmonix` | BPM, beats, downbeats, sections | 912 pop/EDM tracks | github.com/urinieto/harmonixset; audio is not distributed, put your copies in `<root>/audio` named by track id |
+| `manifest` | whatever you fill in | your tracks | a CSV or JSON file, below |
+| `rekordbox` | Rekordbox's BPM, key, beat grid | your tracks Rekordbox analyzed | its collection XML export; scores agreement, not accuracy (rekordbox.md (in the Tastr app's docs)) |
+| `synth` | everything, exact | 12 generated tracks | built in; a smoke test, not a benchmark |
+
+GiantSteps is the closest match to dance music libraries and is the main key
+and tempo benchmark. Harmonix is the one with sections and downbeats.
+
+Other public datasets worth adding, ranked, are in datasets.md (in the Tastr app's docs).
+
+### Getting the GiantSteps audio
+
+The datasets' `audio_dl.sh` scripts no longer work: the JKU mirror is gone from most networks and
+Beatport's backup returns 404. The key dataset's audio is also published on Zenodo as part of
+GiantSteps+ (record 4153506, `audio.zip`, 600 of the 604 tracks, named `<id> <artist> - <title>.mp3`).
+The loaders want `<id>.LOFI.mp3`, so stage a folder with the labels from the dataset repo and one
+symlink per track:
+
+```
+<root>/annotations/key/<id>.LOFI.key      # from the GiantSteps repo
+<root>/audio/<id>.LOFI.mp3                # symlink to the Zenodo file for that id
+```
+
+That audio covers only 43 of the 664 tempo tracks, so tempo scores from it are a small sample.
+Keep the data outside the repo and never commit audio.
+
+### Your own tracks
+
+A CSV (or a JSON list of objects) with these columns, all optional except `path`:
+
+```
+path,bpm,key,boundaries,labels
+Night Shift (Extended Mix).mp3,124,A minor,"0:00 1:01 2:02 3:34",intro build drop breakdown
+```
+
+`path` is relative to the manifest file. `key` accepts "A minor", "Am",
+"F# maj" or Camelot codes like "8A". `boundaries` are section start times in
+seconds or m:ss.
+
+Or label the tracks already in your library and export them. Labels live in their own table, so
+re-analyzing never changes them:
+
+```
+tastr review                                   # tracks most likely analyzed wrong, to label first
+tastr labels set 42 --bpm 174 --key "F minor"  # or --boundaries "0:00 0:32 1:04"; left-out flags are cleared
+tastr labels export my-labels.csv              # a manifest of every labeled track whose audio is on disk
+tastr bench manifest my-labels.csv
+```
+
+Patterns have labels too. In a card's **Drums, bass & chords**, mark what was detected Right, Close or Way off
+per part and section, and save an edited part as the right pattern (features.md (in the Tastr app's docs)).
+`tastr labels patterns` lists the marks and `tastr labels export --patterns patterns.json` writes them, one
+object per track with its audio path and each review: `part`, `start_bar` / `end_bar` (0 / 0 without sections),
+`verdict` (`right`, `close`, `way_off` or null), `truth` (the right pattern, if saved: drums `{lane: steps}`,
+bass `{notes, rhythm}`, chords `{chords}`), `judged` (what the engine made then), `stage_version` and `stale`
+(a re-analysis has changed the pattern since). The verdicts describe the analysis you looked at; only the saved
+right patterns can score a new engine version. A pattern bench that scores them is planned (Linear TAS-59).
+Its API: `GET`/`PUT /api/tracks/{id}/pattern-reviews` (`{part, section: idx | "all", verdict, truth, note}`;
+neither verdict nor truth removes the review) and `GET /api/pattern-reviews`.
+
+How many tracks to label: about 30 for a first useful read (a share right is then known to within about ±15
+to 18 points, enough to catch a big regression), 50 for a steady headline number, and around 100 to tell apart engine
+changes of 5 to 10 points. Spread them over the genres you use, five or more each. For patterns, count tracks
+rather than sections: sections of one track tend to be right or wrong together.
+
+`tastr review` lists unlabeled tracks where a catalog lookup (lookup.md (in the Tastr app's docs)) disagrees with the
+BPM or key, then those whose BPM or key is under 60% likely right. Tracks with a pattern marked Way off (and no
+right pattern saved) or a mark a re-analysis made stale are listed too, labeled or not, right after yours. The app's Review tab shows the same list
+and the panel to label each track (features.md (in the Tastr app's docs)). Its API: `GET /api/review`
+(tracks you put in the list first, marked `mine`; each row has its reasons plus `catalog_bpm` / `catalog_key`),
+`GET`/`PUT /api/tracks/{id}/labels` (`kept: true` marks a "Keep as is"), `GET /api/labels` (your labels, newest
+first, with Tastr's BPM and key when each was saved), and `PUT /api/tracks/{id}/review` with
+`{"state": "flagged" | "skipped" | null}` to put a track in the list, take it out, or leave it to the queue.
+The app asks for the list on every page load, so it is built from the tracks table, which keeps each card's
+BPM, key and "likely right" scores (`bpm_likely`, `key_likely`), and the stored lookups; only tracks with pattern
+reviews have their whole card loaded. Before this it parsed every card, about half a second of CPU per load on
+the Worker.
+
+## Key detection notes
+
+**Method.** The key is a learned model (`estimate_key` in `engine-rs/src/music.rs`): a 24-class logistic
+regression (one class per key, index tonic * 2 + 1 for minor) on the 12-bin key profile, the mean of
+per-frame normalized chroma of the harmonic part. Its 24 x 12 weights and 24 biases live in
+`engine-rs/src/consts.rs` (`KEY_WEIGHTS`, `KEY_BIAS`), written by `tastr.engine.bench.train_key`; the engine
+applies them itself (softmax of W x + b), so scikit-learn is needed only to retrain. Every training track is used at
+all 12 transpositions, so the model learns what a key sounds like relative to its tonic rather than which
+keys a dataset contains, and its predictions transpose with the input. Confidence is the top key's
+probability minus the runner-up's (median 0.29); on the training data, accuracy by confidence quartile goes
+from 32% to 75%.
+
+**Training data.** GiantSteps Key (all 599 tracks with audio), Beatport EDM Key (the 1,122 tracks whose
+annotators gave the label confidence 2; confidence 0 and 1 labels are left out) and 16 synthetic progression
+profiles (I-V-vi-IV, I-IV-V-I, i-VI-III-VII and i-iv-v-i from `bench/synth.py`, tonics C and A, at 118 and 128
+BPM, so not the tests' 124 BPM settings), each weighted 5 times a real track. C = 1.
+
+**Held-out results.** Each dataset split into alternating halves A/B (loader order); train on both
+datasets' A halves (plus the synthetic profiles) and score the B halves, and the reverse (`train_key --holdout`):
+
+| | Krumhansl-Kessler + minor prior (before) | learned model |
+|---|---|---|
+| GiantSteps Key, 599 | 0.650 (A 0.637, B 0.664), exact 56.1% | 0.682 (A 0.675, B 0.689), exact 60.4% |
+| Beatport EDM Key, confidence-2 labels, 1,122 | 0.562 (A 0.581, B 0.542), exact 46.7% | 0.606 (A 0.616, B 0.596), exact 51.5% |
+
+It wins on all four halves, by 0.025 to 0.054 MIREX. Most of the gain is fewer "other" and parallel-mode
+errors. Without the synthetic profiles it scored a little higher on real tracks (GiantSteps 0.684, Beatport
+0.610, smallest gain +0.032) but misread 22 of 48 synthetic tracks; see the known weakness below. Training on
+one dataset alone transfers less (measured without synthetic profiles): Beatport -> GiantSteps scores 0.658
+(Krumhansl 0.650), GiantSteps -> Beatport 0.600 (0.562). That's why it is trained on both. Within GiantSteps
+alone, 2-fold cross-fitting scores 0.673.
+
+**Known weakness.** Major keys are sometimes read as their IV key (a fifth below) on root-heavy triad
+progressions. The test synth's bass root is about 3 times louder than each chord tone, so its I-V-vi-IV in G
+major has mostly the roots G, D, E and C in its chroma, which fit C major as well as G major; Krumhansl-Kessler
+broke that tie toward G, the learned model breaks it toward C. 6 of 48 synthetic tracks (all 24 keys, 4/8/4
+and 2/4/2-bar sections at 124 BPM) are read this way, all major keys a fifth off, and `test_core.test_key` for
+G major is marked as an expected failure. We have no labeled pop set to measure how often real songs with
+these progressions are affected. Things tried to fix it, scored on the held-out halves plus the synthetic suite
+(smallest gain over Krumhansl on any half / synthetic failures): blending in the Krumhansl score,
+log p + lambda * (correlation + 0.10 minor prior), at lambda 0.5, 1, 2, 4, 8, 16: +0.031/20, +0.027/19,
++0.024/17, +0.018/13, +0.021/9, +0.009/4; synthetic profiles weighted x1, x5, x20, x50: +0.032/17,
++0.025/6 (shipped), +0.019/1, -0.002/0; x5 with lambda 2 or 4: +0.023/3, +0.017/2; x20 with lambda 4: +0.001/0.
+No variant read every synthetic track right and kept a +0.025 gain on every half.
+
+Since the major bonus (below), the same 48 tracks fare worse: on 2026-11-08 the shipped model read 30 of 48
+wrong, the 6 major keys as their IV key as before plus all 24 minor tracks as their relative major. The tests
+accept the relative major for minor keys, so they still pass. Bass-line and chord inputs did not fix either
+without costing real tracks; see "Bass-line and chord-progression cues" below.
+
+**Full bench (in-sample: every track was in the training set, so these are not held-out numbers),
+`--stages core`, 2026-10-29:** GiantSteps Key 599 tracks, MIREX 0.676, exact 59.9% (fifth 67, relative 23,
+parallel 28, other 122), 408 s with `--jobs 8`. Beatport EDM Key, all 1,275 scored tracks, MIREX 0.586, exact 49.1%
+(fifth 142, relative 73, parallel 143, other 291), 866 s; on its confidence-2 labels alone 0.612, exact 52.0%.
+Krumhansl-Kessler scored 0.650 and 0.537 on the same sets. The GiantSteps in-sample score is a little below
+its held-out one (0.682), because the strongly regularized fit on all tracks is dominated by Beatport's 1,122.
+
+**Retraining.** Cache features once per dataset (about 5 s per track per worker), then fit in seconds:
+
+```
+python -m tastr.engine.bench.key_features giantsteps-key ~/data/giantsteps-key ~/data/features/giantsteps-key --jobs 8
+python -m tastr.engine.bench.key_features beatport-key ~/data/beatport-key ~/data/features/beatport-key --jobs 8
+python -m tastr.engine.bench.train_key \
+    --data giantsteps-key ~/data/giantsteps-key ~/data/features/giantsteps-key \
+    --data beatport-key ~/data/beatport-key ~/data/features/beatport-key --holdout   # check first
+python -m tastr.engine.bench.train_key --data ... --data ... --write                 # writes consts.rs
+```
+
+Or without the audio or a cache on this machine: `tastr key-profiles` computes each track's 12-bin key
+profile and label (all `train_key` reads) on Modal against the R2 bucket and saves them in one small JSON
+file (about 300 KB for Beatport):
+
+```
+tastr key-profiles giantsteps-key giantsteps-key --remote --out results/gs-key-profiles.json
+tastr key-profiles beatport-key beatport-key --remote --out results/bp-key-profiles.json
+python -m tastr.engine.bench.train_key --profiles results/gs-key-profiles.json \
+    --profiles results/bp-key-profiles.json --holdout                               # then --write
+```
+
+Without `--remote` it runs on a local folder (`--jobs N`); `--from-cache FEATURES` converts an existing
+feature cache without decoding anything. Recompute the profiles after changing `signals.chroma` or
+`music.key_profile`. Experiments that need the full chroma or bass CQT still use the local cache.
+
+`train_key` renders the synthetic progressions itself (about a minute; `--no-synth` leaves them out). The
+cached `.npz` files also hold the 36-bin bass CQT and the label confidence, so other estimators can be
+scored offline the same way. Bump the core stage version when the model changes.
+
+**Tried and dropped on Beatport EDM Key** (confidence-2 labels, halves A/B, against Krumhansl-Kessler at 0.562):
+Temperley (0.547) and Temperley 2005 (0.495) profiles trade parallel errors for many more fifth errors.
+Shaath (0.580), Faraldo's EDMA (0.580) and bgate (0.582) profiles from essentia gained about 0.02 on both
+halves, under the noise level, and only edma helped on GiantSteps (0.662; bgate 0.646). Mixing a bass chroma
+(the 36-bin `signals.bass_cqt` folded to 12 pitch classes) into the profile at 0.25 or 0.5 made things worse
+(0.557, 0.547). Letting the strongest bass pitch class pick the tonic was much worse (0.473), so in these
+tracks it is often not the tonic. Adding the bass profile to the learned model's inputs changed nothing beyond
+noise. The minor prior (bonus for minor keys in the Krumhansl correlation, 0.10) was flat from 0.08 to 0.15 on
+Beatport (0.535 to 0.544) even though only 70% of its labels are minor, against 85% on GiantSteps.
+
+**FMA Keys, zip 0 (2026-10-31, held out):** 695 full-length Free Music Archive songs across genres, half
+major, scored with the core stages on Modal (Rust engine, main 8d55d6b, not recorded). 687 scored: MIREX
+weighted **0.551**, exact 0.476 (327 exact, 65 fifth, 21 relative, 62 parallel, 212 other), against 0.650 on
+GiantSteps. The model leans minor, which suits EDM and hurts here:
+
+| Reference | n | Weighted | Exact | Read as the other mode |
+|---|---|---|---|---|
+| major | 348 | 0.395 | 0.316 | 194 |
+| minor | 339 | 0.710 | 0.640 | 20 |
+
+The "other" misses are mostly major songs read as one of their own minor chords: +4 semitones (iii) 40,
++2 (ii) 27, +7 as minor 18. A cluster of 64 lands one semitone below the reference, which looks like tuning.
+Major read as IV, the worry from GiantSteps, didn't happen at all (0). Key confidence does separate right
+from wrong: the top half by confidence scores 0.679, the top quarter 0.753, the bottom half 0.422. Next
+steps for the model (after the Rust port): a weaker minor lean or a genre-balanced training set, and a look
+at the semitone-flat tuning cluster.
+
+The first run also had 8 songs the Rust decoder refused: symphonia 0.5's ID3v2 reader rejects a file at
+probe time when any ID3v2.4 frame is flagged compressed ("id3v2: compressed frames are not supported"). ffmpeg and librosa read them fine. PR #53 makes the Rust decoder retry past the leading ID3v2 tags, and
+adds the same Python fallback to the bench that the app already has.
+
+**Rerun with all 695 (2026-11-01, main 696c32c, after PR #53):** every song decodes now. MIREX weighted
+**0.550**, exact 0.475 (330 exact, 65 fifth, 21 relative, 66 parallel, 213 other). Major refs (355) 0.395,
+minor refs (340) 0.711; 199 of 355 major songs read as minor. Of the 8 newly decoded songs, 3 are right, 4
+are major songs read as their parallel minor and 1 is other, so they match the rest. The confidence split
+holds (top half 0.678, bottom half 0.421). The minor lean (TAS-30) is still the thing to fix.
+
+### Minor lean (2026-11-01, TAS-30)
+
+GiantSteps and Beatport labels are 85% and 70% minor, so the fitted bias leans minor. On EDM that costs
+little; on FMA Keys it reads 56% of major songs as minor. `train_key` now adds `MAJOR_BONUS` to the 12 major
+keys' bias after fitting. Swept on the cached key profiles (`tastr key-profiles`): GiantSteps and Beatport
+on the alternating held-out halves, FMA Keys (never trained on) with the model fitted on both. Weighted
+score, and major songs read as minor out of 355:
+
+| Major bonus | FMA all | FMA major | FMA minor | Major read as minor | GiantSteps held out | Beatport held out |
+|---|---|---|---|---|---|---|
+| 0 (before) | 0.549 | 0.393 | 0.711 | 200 | 0.682 | 0.606 |
+| 0.25 | 0.566 | 0.436 | 0.702 | 174 | 0.677 | 0.608 |
+| **0.35 (shipped)** | **0.571** | **0.445** | **0.702** | **170** | **0.673** | **0.614** |
+| 0.45 | 0.580 | 0.468 | 0.696 | 155 | 0.670 | 0.624 |
+| 0.5 | 0.585 | 0.478 | 0.696 | 151 | 0.663 | 0.625 |
+| 0.75 | 0.583 | 0.504 | 0.665 | 130 | 0.651 | 0.605 |
+| 1.0 | 0.570 | 0.524 | 0.618 | 110 | 0.631 | 0.589 |
+| 1.5 | 0.553 | 0.599 | 0.504 | 54 | 0.538 | 0.525 |
+| class-balanced refit, +0 | 0.567 | 0.525 | 0.611 | 109 | 0.627 | 0.582 |
+| class-balanced refit, +0.25 | 0.572 | 0.571 | 0.574 | 73 | 0.578 | 0.561 |
+
+0.35 is the largest bonus that keeps GiantSteps within 0.01 of before; Beatport gains. 0.45 does better on
+FMA and on both EDM sets together, but GiantSteps drops 0.012 (within its half-to-half noise, which is why
+0.45 scores above 0.40 there). Refitting with major and minor tracks weighted equally evens out FMA's two
+modes but costs GiantSteps 0.055 and Beatport 0.024, so it was dropped.
+
+Full benches with the shipped model (core 0.4.0, Rust engine; GiantSteps and Beatport are in-sample): GiantSteps
+**0.669**, exact 59.1% (was 0.682 / 60.6%); Beatport **0.596**, exact 50.1% (was 0.587 / 49.1%); FMA Keys
+**0.572**, exact 49.8% (was 0.550 / 47.5%), major songs 0.447 (was 0.395), minor 0.702 (was 0.711). The key
+calibration was refit from the new held-out rows (1,721 tracks; held-out Brier raw 0.302, flat 0.248,
+calibrated 0.225). It is a modest fix: 168 of 355 FMA major songs are still read as minor, mostly as their
+parallel minor or a minor chord of their own key. The real fix is non-EDM major songs in the training set,
+for example from the other FMA Keys zips, with zip 0 kept for checking.
+
+**Training on more FMA songs (2026-11-01, TAS-61): tried, not shipped.** Zips 050-059 and 060-069 (1,057
+labeled songs, 559 major, now in the bucket) were added to the training profiles at several weights, with zip
+0 still held out. Weighted score; "new FMA" is the held-out half of the 1,057:
+
+| Training set | Major bonus | FMA zip 0 all | zip 0 major | zip 0 major read as minor | GiantSteps held out | Beatport held out | New FMA held out |
+|---|---|---|---|---|---|---|---|
+| GiantSteps + Beatport (shipped) | 0.35 | 0.571 | 0.445 | 170 | 0.673 | 0.614 | 0.635 (never trained on) |
+| + new FMA, full weight | 0 | 0.558 | 0.418 | 189 | 0.659 | 0.600 | 0.638 |
+| + new FMA, full weight | 0.35 | 0.581 | 0.484 | 144 | 0.636 | 0.605 | 0.654 |
+| + new FMA x0.1 | 0.35 | 0.572 | 0.447 | 169 | 0.673 | 0.620 | 0.627 |
+| + new FMA x0.25 | 0.35 | 0.574 | 0.453 | 165 | 0.661 | 0.617 | 0.636 |
+| + new FMA x0.5 | 0.35 | 0.578 | 0.461 | 158 | 0.652 | 0.615 | 0.644 |
+
+Within the GiantSteps rule (no more than 0.01 below before), the best variant (x0.1) ties the shipped model
+on zip 0, and every variant that helps zip 0 more costs GiantSteps 0.02 to 0.05. The bigger finding is that
+zip 0 overstates the problem. On the 1,057 new songs, which it never saw, the shipped model scores 0.635: major
+0.608, minor 0.666, and only 168 of 559 major songs (30%) read as minor, against 48% on zip 0. Across all
+1,752 FMA songs it is about 0.60. Zip 0 (track ids 0-19,999, the oldest uploads) has unusually hard major
+songs; a per-genre look would say why. Key profiles for the new songs took 698 s on Modal.
+
+**All 1,752 FMA Keys songs (2026-11-01, core 0.4.0, Rust):** MIREX weighted **0.610**, exact **0.519** (909 exact,
+208 fifth, 118 relative, 100 parallel, 417 other). Major songs (914) 0.545, 336 (37%) read as minor; minor songs
+(838) 0.680. By zip: 000-019 0.572 (major 0.447, 47% read as minor), 050-059 0.620 (major 0.580, 34%), 060-069
+0.650 (major 0.633, 27%). Outside zip 0 the misses lean to fifth and relative more than parallel. This is the
+Glossary's FMA Keys number (`tastr bench fma-keys ... --record` now records it).
+
+**Why zip 0 is harder: rock.** From the mp3s' ID3 genre tags (1,499 of 1,752 songs tagged), major songs read
+as minor by genre, zip 0 against the two new zips: Rock 52% / 49% (79 / 35 songs), Blues 100% / 56% (4 / 9),
+Punk 60% / 30%, Electronic 50% / 37%, Folk 35% / 18%, Pop 42% / 12% (19 / 89), Classical none / 12%. Zip 0
+has 165 Rock songs of 695, the new zips 54 of 1,057 but 143 Pop. Major rock and blues songs read as minor about
+half the time in either set, so genre, not the zip, drives the lean, and no single artist accounts for it (at
+most 6 of zip 0's 168 misses). That fits the music: power chords carry no third, and rock and blues riffs use
+the minor pentatonic over major keys. More training data won't fix that. Ideas, not started: lower the key
+confidence or call the mode uncertain when the third and sixth degrees are weak, and bench rock separately.
+
+### Mode uncertain (2026-11-08)
+
+Cards now carry `key.mode_uncertain`: major or minor is a guess. It is raised when both of these hold
+(engine-rs `music::mode_uncertain`, thresholds `MODE_UNCERTAIN_THIRD` and `MODE_UNCERTAIN_MARGIN` in music.rs):
+
+- the thirds don't say: |major 3rd - minor 3rd| / (their sum) in the key profile, above the chosen tonic, is
+  under 0.15 (`third_contrast`; power chords leave both faint, minor-pentatonic riffs over a major key make
+  them equal);
+- the key model barely prefers this mode: the top key's probability is less than 0.2 ahead of its parallel
+  key's (`KeyEstimate::mode_margin`).
+
+Measured with `python -m tastr.engine.bench.key_mode` on the cached key profiles (`tastr key-profiles`, run on
+Modal; FMA genres from the mp3s' ID3 tags). "Mode wrong" counts tracks whose tonic is right but whose mode isn't:
+
+| Set | Flagged | Mode wrong, flagged | Mode wrong, not flagged |
+|---|---|---|---|
+| FMA Keys, all 1,752 | 11% | 35% (33 of 95) | 7% (68 of 914) |
+| FMA Rock + Blues + Punk (284) | 16% | 48% (13 of 27) | 13% (21 of 162) |
+| FMA, other genres (1,215 tagged) | 10% | 30% (17 of 56) | 6% (40 of 630) |
+| GiantSteps (599) | 15% | 20% (7 of 35) | 6% (22 of 345) |
+| Beatport, sure labels (1,122) | 22% | 26% (34 of 132) | 16% (95 of 592) |
+
+It holds on both FMA halves (zip 0: 19 of 47 flagged against 36 of 353; zips 050-069: 14 of 48 against 32 of
+561). On flagged rock songs the mode is a coin flip, which is what the flag should say. The thresholds were
+picked on these same profiles, so read the numbers as in-sample.
+
+What it doesn't fix: most of the major songs read as minor don't keep their tonic. With the current model, 87 of
+FMA's 338 are the parallel minor; the rest are a minor chord of the key (iii, ii, vi) or something else, and the third
+above the wrong tonic says nothing useful about those. Among songs read as minor, neither the third nor the sixth
+contrast tells the major ones apart (AUC about 0.52); the key confidence does better (0.65, 0.71 on rock). The
+sixth adds nothing over the third for parallel misses either (AUC 0.64 against 0.77 for the third alone on
+FMA), and how loud the thirds are against the tonic and fifth doesn't help (0.57). The key model's own
+parallel margin alone does about as well as the third (0.75). Requiring both flags fewer tracks (11% of FMA
+against 16% for the margin under 0.2 alone) and is right more often when it fires (35% against 31%). Card benches (`tastr bench`) now report the flag too: how many tracks it marks, and the parallel-miss
+rate with and without it.
+
+### Bass-line and chord-progression cues (2026-11-08): tried, not shipped
+
+The open "a fifth off" errors (68 of 599 GiantSteps tracks held out, 111 of 1,122 Beatport) and the synthetic
+IV-key reads looked like they needed a bass or chord cue: the bass root and the chord at the start of a phrase
+usually sit on the tonic, and whole-track chroma averages that away. Each cue below was added to the learned
+model as extra 12-bin blocks next to the key profile (every block rolled with the key, so the model stays
+transposition-equivariant), refit with the same settings (C = 1, major bonus 0.35, synthetic profiles x5),
+and scored on the alternating held-out halves. The bass comes from the engine's 36-bin bass CQT (lowest two
+octaves folded to 12 pitch classes, frames below 20% of the 90th-percentile low-band power ignored); bars,
+beats and sections come from the engine's card. Weighted score, fifth errors, synthetic failures of 48:
+
+| Extra input | GiantSteps (A / B) | fifth | Beatport conf-2 (A / B) | fifth | Synthetic |
+|---|---|---|---|---|---|
+| none (shipped model) | 0.673 (0.672 / 0.674) | 68 | 0.614 (0.619 / 0.609) | 111 | 30 |
+| bass chroma, mean of per-frame normalized | 0.670 | 71 | 0.619 | 106 | 32 |
+| held bass notes (argmax held at least 8 frames), by duration | 0.678 | 68 | 0.620 | 101 | 35 |
+| bass notes reached by a falling fifth | 0.671 | 70 | 0.616 | 116 | 33 |
+| bass note of every bar | 0.680 | 70 | 0.617 | 105 | 33 |
+| bass note on every downbeat (first beat) | 0.680 | 75 | 0.620 | 111 | 32 |
+| bass note on the first bar of each section | 0.667 | 75 | 0.625 | 121 | 28 |
+| bass note on the first bar of each 4-bar phrase (counted from section starts) | 0.674 | 72 | 0.617 | 110 | 27 |
+| the same, 8-bar phrases | 0.674 | 76 | 0.623 | 115 | 28 |
+| chord of every bar (major and minor triad roots, two blocks) | 0.652 | 75 | 0.616 | 110 | 24 |
+| chord on the first bar of each 4-bar phrase | 0.654 | 68 | 0.598 | 107 | 12 |
+| the same, 8-bar phrases | 0.656 | 71 | 0.596 | 105 | 16 |
+| chord on the first bar of each section | 0.660 | 74 | 0.603 | 119 | 17 |
+| V to I cadences (major chord falling a fifth), by target root | 0.673 | 73 | 0.614 | 123 | 31 |
+| 4-bar phrase bass and 4-bar phrase chords together | 0.655 | 64 | 0.597 | 102 | 14 |
+
+No bass input moves either dataset beyond the noise (the halves differ by 0.01 to 0.02 on their own) or cuts fifth errors on both.
+Phrase-start chords do fix most synthetic misses (30 to 12), but cost GiantSteps 0.02 and Beatport 0.016,
+mostly as extra parallel-mode errors, so none was kept.
+
+**Why the bass can't help here.** In the tracks the model reads a fifth off, the bass agrees with the model,
+not the label. The most-held bass note is the predicted key's tonic in 31 of the shipped model's 67 GiantSteps fifth errors (in-sample) and
+the labeled tonic in only 12; on Beatport 52 against 14. At 4-bar phrase starts it is 23 against 10 and 56
+against 8. These tracks mostly sit on a bass note a fifth from the labeled tonic (a minor track labeled A minor
+with its bass on E, say), so the label follows the scale while the bass and chroma point at the fifth. A
+cue that should pull those tracks toward the label would have to come from somewhere else, for example
+melody or the scale's sixth and second degrees, not the low end. The synthetic misses are different: their
+four chords are equally long and loud, so only the phrase start tells I from IV, and real EDM previews
+rarely give the model that cue cleanly. FMA Keys, the one set with pop progressions, never showed the IV
+read (0 of 695 in zip 0), so the synthetic weakness may not matter for real songs.
+
+How it was run: GiantSteps (Zenodo 4153506) and Beatport EDM Key (Zenodo 1101082) audio, all 599 and 1,275
+scored tracks, feature caches from `key_features` (chroma and bass CQT) plus each track's card for beats,
+downbeats and sections, then offline fits in seconds each. No engine change shipped, so FMA Keys was not
+rerun.
+
+**Before the learned model** (Krumhansl-Kessler correlation, measured on GiantSteps): most errors were not
+relative swaps but parallel-mode (12% of tracks before the minor prior) and fifth errors (11 to 13%).
+Per-frame normalized chroma beat the plain mean, and the model still uses it. Tried and dropped there:
+band-split chroma with learned profiles, tuning-corrected 36-bin CQT chroma, 10 s windowed voting,
+learned per-mode profiles, compressing the chroma (power 0.35 to 0.7), tonic or tonic+fifth+third energy
+bonuses, and overtone-suppressed chroma. On 200-track subsets, differences under about 0.03 MIREX were noise.
+
+- Environment: librosa 1.0 with numba 0.68 and numpy 2.5 segfaults in `onset_detect`. These worked:
+  numpy<2.3, numba 0.61.2, llvmlite 0.44.0, librosa 0.11.0, scipy<1.16 (the Modal images pin them; locally
+  they come with the `engine` extra, which `dev` includes).
+  A segfault in `beat_track` with matching versions came from a numba cache corrupted when parallel workers
+  compiled into it at once. `--jobs` now analyzes one track before starting workers; if a cache is already
+  broken, delete the `.nbi`/`.nbc` files under librosa's `__pycache__` or point `NUMBA_CACHE_DIR` at a fresh folder.
+
+## Confidence calibration
+
+The raw `bpm_confidence` and key `confidence` say how clear the evidence was in one track, not how often
+the answer is right: a track with a steady, pronounced beat can score 0.94 and still be read at 2/3 tempo.
+`calibration.likely_correct` maps each raw score to the share of benchmark tracks with that score that were
+right (BPM: Acc1, within 4% of the label; key: the exact key), and the card stores it as
+`core.bpm_likely_correct` and `key.likely_correct`. The UI shows it as "N% likely right"; cards analyzed
+before calibration keep the raw "N% conf" until re-analyzed.
+
+The map is an isotonic (non-decreasing) fit, pooled into blocks of at least 40 tracks, with each block's rate
+nudged towards 1/2 by half a track. Tables live in `engine-rs/src/consts.rs` (`BPM_KNOTS`, `KEY_KNOTS`),
+written by `tastr.engine.bench.calibrate`. Key rows must be out-of-fold: the key model was trained on GiantSteps and
+Beatport, so a plain bench report on those sets is in-sample and overconfident. `train_key --holdout
+--calibration-rows` saves the alternating-half held-out confidence and result for every track. It takes `--profiles` files
+from `tastr key-profiles --remote` in place of `--data`, so this step needs no local audio either.
+
+```
+python -m tastr.engine.bench.train_key --data giantsteps-key GS GS-FEATURES --data beatport-key BP BP-FEATURES \
+    --holdout --calibration-rows results/key-oof.json
+tastr bench beatport-tempo BP --out results/bp-tempo-core.json
+tastr bench giantsteps-tempo GS-TEMPO --out results/gs-tempo-core.json
+python -m tastr.engine.bench.tempo_spec BEAT-THIS --dataset hjdb --out results/hjdb-tempo.json
+python -m tastr.engine.bench.calibrate --bpm results/bp-tempo-core.json results/gs-tempo-core.json \
+    results/hjdb-tempo.json --key results/key-oof.json          # held-out check and reliability table
+python -m tastr.engine.bench.calibrate ... --write             # then write consts.rs and rebuild
+```
+
+**Fitted 2026-10-30.** BPM from 1,052 tracks, `--stages core`: Beatport tempo 774 (Acc1 0.872), GiantSteps
+tempo 43 (0.721), hjdb 235 (0.919); 87.6% right overall. Key from 1,721 out-of-fold rows: GiantSteps 599,
+Beatport 1,122; 54.6% exact overall. Held-out Brier (fit on one alternating half, scored on the other;
+lower is better), raw score / flat overall rate / calibrated: BPM 0.284 / 0.109 / 0.095, key 0.280 / 0.249 /
+0.224. Reliability, five equal-count bins of the raw score:
+
+| BPM raw | Tracks | Predicted | Actual | | Key raw | Tracks | Predicted | Actual |
+|---|---|---|---|---|---|---|---|---|
+| 0.32-0.43 | 206 | 63% | 61% | | 0.00-0.09 | 339 | 33% | 34% |
+| 0.43-0.44 | 207 | 92% | 93% | | 0.09-0.21 | 348 | 41% | 40% |
+| 0.44-0.45 | 203 | 94% | 95% | | 0.21-0.36 | 346 | 57% | 57% |
+| 0.45-0.46 | 212 | 95% | 94% | | 0.36-0.56 | 343 | 66% | 68% |
+| 0.46-0.98 | 224 | 95% | 94% | | 0.56-0.97 | 345 | 76% | 74% |
+
+The raw BPM score is bunched in 0.41-0.47 on all three sets, so it mostly separates the bottom fifth
+(about 60% right) from the rest (about 94%); it says little among confident tracks.
+
+**BPM refit 2026-10-31, core 0.3.0** (pulse clarity fixed, Linear TAS-21; Rust engine, hjdb on the Python
+reference). Same 1,052 tracks, same Acc1 (Beatport 0.897, GiantSteps 0.744, hjdb 0.923; 89.6% right), since
+pulse only feeds the confidence. The raw score now spreads out: Beatport p10/50/90 0.66 / 0.80 / 0.93, against
+0.42 / 0.45 / 0.48 before. Held-out Brier, raw / flat / calibrated: 0.099 / 0.094 / 0.084, against 0.284 /
+0.109 / 0.095. The key table is unchanged.
+
+| BPM raw | Tracks | Predicted | Actual |
+|---|---|---|---|
+| 0.33-0.70 | 210 | 75% | 72% |
+| 0.70-0.76 | 211 | 89% | 89% |
+| 0.76-0.80 | 207 | 93% | 96% |
+| 0.80-0.86 | 212 | 96% | 95% |
+| 0.86-0.98 | 212 | 96% | 96% |
+
+Refit after changing the tempo or key logic (a new `THREE_TWO_RATIO`, a retrained key model). The
+benchmarks are EDM-heavy (Beatport, GiantSteps) plus jungle / hardcore (hjdb), so the figures describe
+those genres best.
+
+## Tempo notes
+
+Measured on the 43 GiantSteps tempo tracks that have audio in the Zenodo mirror (`annotations_v2`),
+`--stages core`. With 43 tracks one track is 2.3 points, so only large effects are evidence.
+
+- Baseline: BPM within 4% 0.488, incl. x2/half 0.605. Tracks at 165 BPM or faster (drum & bass) were right
+  on 1 of 16, usually reported at 2/3 tempo (117 for 174) because the beat tracker prefers tempos near 120.
+- Fix: when the onset tempogram is at least `core.THREE_TWO_RATIO` (0.9) as strong at 1.5x the tracked tempo,
+  re-track at 1.5x. Straight 4/4 tracks have little periodicity at 1.5x their beat (ratio mostly 0.3 to 0.8),
+  2/3-tempo drum & bass mostly 0.9 to 1.1. After: 0.698 / 0.861; fast tracks 9 of 16, slower tracks 21 of 27
+  (two gained, one 121 BPM track lost to 161). 0.85 to 0.9 scored best; the threshold was picked on these
+  same 43 tracks, so recheck it when more tempo-labeled audio is available.
+- Retuned on more data (2026-10-30): `THREE_TWO_RATIO` 0.9 -> 0.8, picked on the 200 hjdb train tracks
+  (0.75 to 0.85 score alike) and checked on the rest. Acc1 / Acc2, `--stages core` for audio:
+
+  | Set | Tracks | Before (0.9) | After (0.8) |
+  |---|---|---|---|
+  | hjdb train (spectrograms, `bench.tempo_spec`) | 200 | 0.755 / 0.785 | 0.910 / 0.940 |
+  | hjdb val | 35 | 0.829 / 0.829 | 0.971 / 0.971 |
+  | `beatport-tempo` | 774 | 0.872 / 0.899 | 0.872 / 0.906 |
+  | `giantsteps-tempo` | 43 | 0.698 / 0.861 | 0.721 / 0.884 |
+
+  hjdb errors (est / ref) went from 2/3 x35, 4/5 x7, half x6 to 4/5 x7, half x6, 2/3 x3 on train. Beatport
+  is unchanged in total but swaps 11 tracks each way: 110-120 BPM tracks pushed to 161-172 are lost, house and
+  techno tracked at 83-92 are fixed (re-tracked at 1.5x to 123-144).
+- hjdb (jungle / hardcore, in the Beat This! release) is not a 174 set: median 154 BPM, range 120-171, 35
+  tracks below 140, 160 at 140-160, 37 at 160-170, 3 at 170 or more. Its main error was 2/3 tempo, not half.
+  `bench.tempo_spec` rebuilds core's onset envelopes from the spectrograms and resamples them to core's
+  43 fps (the tempo logic is not frame-rate invariant: the unchanged audio path at 50 fps flips 4 of the
+  43 GiantSteps calls). On GiantSteps audio the adapter gives the audio path's BPM on 39 of 43 tracks, with
+  the same Acc1; it is a proxy, not the audio path.
+- Beatport's bpm is the DJ tempo and its drum & bass labels follow no one convention: of 40 tracks, 22 are
+  listed at 84-92 (half time), 8 at 111-119 (about 2/3 of 174), 8 at 160-175, 2 elsewhere. So
+  `beatport-tempo` Acc1 on drum & bass mostly measures the labeling (19 of 40 exact, 26 counting double / half).
+  Dubstep is listed at 140, some hip-hop at 150-195 (double time).
+- Tempo from the beat grid, not the median beat gap (2026-11-12, core 0.6.0). The tracker's beats sit on whole
+  frames (43.07 fps), and when they weren't steady enough to regularize, the reported BPM was the median gap,
+  which snaps to a whole number of frames: 22 frames is 117.45 BPM, 21 is 123.05, and main's outputs repeat
+  those values (and 172.27). A track at ~118.8 BPM (beats 22, 22, 22, 21 frames apart) read 117.45, and
+  mash-ups built on it drifted a quarter beat every 5 bars. Now the BPM is the slope of a line through the beats
+  against their beat counts (`beat_period`, the fit `regularize` uses). Subsets on Modal, Acc1 / Acc2 unchanged
+  and no track's verdict changed; the gain is precision, measured on tracks right under Acc1 both times:
+
+  | Set | Tracks | Acc1 / Acc2 | Mean abs error (BPM) | Median signed error | Off by > 1 BPM |
+  |---|---|---|---|---|---|
+  | `beatport-tempo` (`--limit 100`) | 90 | 0.900 / 0.940 | 1.185 -> 0.269 | +0.075 -> +0.010 | 41 -> 4 |
+  | `giantsteps-tempo` | 33 | 0.767 / 0.884 | 1.594 -> 0.878 | -0.090 -> -0.580 | 19 -> 13 |
+
+  GiantSteps still reads 1-2 BPM low on several tracks (127 -> 124.6, 121 -> 119.7, 142 -> 140.6), so its
+  median moved down while its mean error nearly halved; the cause is not yet known. Its baseline here (0.767 /
+  0.884) differs from the earlier 0.744 / 0.907; main produced it before this change.
+- Tempo checked against the whole track's pulse (2026-11-17, core 0.7.0). The GiantSteps "reads 1-2 BPM low"
+  above was mostly the labels. On 15 of the 43 tracks, the strongest beat-rate plus half-beat-rate Fourier
+  component of the percussive onset envelope over the whole preview (searched in 0.0002 steps) lands within 0.05
+  of a whole number every time, and agrees with the original Beatport labels (`annotations/`) where
+  `annotations_v2` disagrees: the "121" tracks (4014747, 4014749) are 120.0, "127" (2676506, 4275052, 4693198) is
+  126.0, "142" (4723905) and "139" (3349486, 3574815, 5079918) are 140.0, "129" (3535112, 3892740) is 128.0. The
+  v2 labels are tapped and rounded, so they are off by 1-2 BPM on about half of these.
+  The engine had real misses too, all on tracks whose beats weren't steady enough to regularize: the tracker
+  drops a beat in quiet parts (gaps of 23-26 frames at 20.5 frames per beat), each such gap counts as one
+  beat, and the line fit reads low (4275052: 248 beats in 120 s, 124.64 BPM for 126.0). Core now takes the
+  period within 2.5% of the line fit whose beat and half-beat Fourier magnitudes over the whole onset envelope
+  sum highest (`refine_period`), and respaces an even grid at it (kept on its middle beat) when the grid was
+  already even. On the 15 tracks: 124.64 -> 125.98, 125.38 -> 125.98, 139.38 -> 140.00, 140.64 -> 140.00,
+  119.65 -> 120.01, 125.19 -> 125.01, 122.42 -> 122.01; already-right tracks move by 0.1 or less. The
+  synthetic golden cards' beats move by 1 ms. The search is bounded, so a wrong metrical level stays wrong
+  (and can move by up to 2.5%): it only sharpens a tempo that is already about right.
+  Subsets on Modal (`modal run` from each branch), Acc1 / Acc2 unchanged on all three and no track's verdict
+  changed; precision on tracks within Acc1 both times:
+
+  | Set | Tracks | Acc1 / Acc2 | Mean abs error (BPM) | Median signed error | Off by > 1 BPM |
+  |---|---|---|---|---|---|
+  | `beatport-tempo` (`--limit 100`) | 90 | 0.900 / 0.940 | 0.269 -> 0.026 | +0.010 -> +0.000 | 4 -> 0 |
+  | `giantsteps-tempo` | 33 | 0.767 / 0.884 | 0.878 -> 0.822 | -0.580 -> -0.020 | 13 -> 9 |
+  | hjdb (spectrogram tempo bench, all 235) | 219 | 0.932 / 0.949 | 1.020 -> 0.957 | +0.350 -> +0.330 | 103 -> 101 |
+
+  GiantSteps' remaining "> 1 BPM" tracks are mostly the v2 labels above (the engine reads 140.0 for "139",
+  120.0 for "121", 175.0 for "174" where the original label is 175). hjdb's references come from its beat
+  annotations and aren't whole numbers (142.86), so its error is mostly label spread.
+- Tried and dropped (Acc1 counts as hjdb train / Beatport / GiantSteps, from 151 / 675 / 30 at 0.9):
+  - Onsets from the full mix instead of the HPSS percussive part: 50:50 mix at 0.8 gives 186 / 668 / 34, full
+    mix 184 / 659 / 34. Helps the fast sets, costs Beatport 7 to 16 tracks.
+  - A lower ratio only below 115 BPM (0.75, keeping 0.9 for 115-120): 185 / 681 / 31. Better on Beatport, but
+    the split was found by looking at Beatport's losses, so it is not a held-out result.
+  - Moving the 1.5x ceiling (re-track only when 1.5x the tempo is below `MAX_BPM` 180): 170-175 loses 6-7
+    GiantSteps tracks, 185-200 loses 6-17 Beatport tracks.
+  - Doubling when 2x lands in 150-185, gated on tempogram strength at 2x (ratio 0.6-1.0) or on off-beat
+    onset strength: fixes at most 5 half-tempo tracks on hjdb train and 4 on GiantSteps, costs Beatport 7-24.
+    The losses are real 85-92 BPM hip-hop and downtempo as well as half-time drum & bass labels.
+  - Re-tracking at 1.25x for the 4/5 locks (tracked 117-129, labeled 146-165): the 1.25x strength on those
+    (0.78-1.01) overlaps correctly tracked 128 BPM tracks (0.55-1.01). Every rule did nothing or cost
+    Beatport 5 to 48 tracks.
+- 1.5x switch gated on meter (2026-10-30): on GTZAN (999 tracks, `bench.tempo_spec`) the switch fired on
+  183 tracks, wrongly on 101 (right tempo -> 1.5x, the tracker landing on dotted eighths) and rightly on 17.
+  Turning the switch off scored Acc1 0.668 vs 0.585 with it. The wrong switches' beats group in 3s: core's
+  `_meter_score` on the faster grid was above 0 on 89 of 101 wrong switches and 2 of 17 right ones (median
+  1.7 vs -4.5), while the tempogram ratio alone overlaps with the drum & bass cases it was tuned for. Now the
+  switch is skipped when that score is above `THREE_TWO_MAX_METER` (0). GTZAN Acc1 0.585 -> 0.673, Acc2
+  0.872, 1.5x errors 101 -> 21. The sets the switch was tuned for didn't lose anything (Acc1 / Acc2, on
+  Modal via `modal run`, see cloud.md):
+
+  | Set | Tracks | Before | After |
+  |---|---|---|---|
+  | GTZAN (spectrograms) | 999 | 0.585 / - | 0.673 / 0.872 |
+  | hjdb train (spectrograms) | 200 | 0.910 / 0.940 | 0.915 / 0.945 |
+  | hjdb val | 35 | 0.971 / 0.971 | 0.971 / 0.971 |
+  | `beatport-tempo` | 774 | 0.872 / 0.906 | 0.897 / 0.930 |
+  | `giantsteps-tempo` | 43 | 0.721 / 0.884 | 0.744 / 0.907 |
+
+  The gate was picked on GTZAN only, so the other four rows are held out.
+- Drum & bass at full tempo (2026-11-08): drum & bass read at half tempo (86 for 174) is now doubled when the
+  doubled tempo lands in 160-180 and the snare hits on every beat of the slow grid. At 174 the snare lands on
+  2 and 4 of each fast bar, which is every slow beat at 87; a real 85-90 BPM backbeat hits every other beat.
+  `core::fast_backbeat` takes the mid drum part (drums.rs's NMF part between kick and hats, less what the kick
+  and hats leak into it: snare, clap, perc), samples its strongest hit near each half beat, and averages the
+  four half beats of a two-beat cycle. Of the two pairs one beat apart, the stronger pair must be even
+  (`BACKBEAT_BALANCE`, weaker hit / stronger, at least 0.8) and stand out (`BACKBEAT_CONTRAST`, the pair over
+  the other pair, at least 2). Contrast keeps out busy percussion that hits every half beat (psy-trance, 140
+  BPM tracks read at 87). Acc1 / Acc2 and how many tracks read at 160-180, before -> after:
+
+  | Set | Tracks | Before | After | At 160-180 |
+  |---|---|---|---|---|
+  | GTZAN (spectrograms) | 999 | 0.673 / 0.872 | 0.676 / 0.872 | 91 -> 98 |
+  | hjdb train (spectrograms) | 200 | 0.915 / 0.945 | 0.925 / 0.945 | 44 -> 46 |
+  | hjdb val | 35 | 0.971 / 0.971 | 0.971 / 0.971 | 4 -> 4 |
+  | `giantsteps-tempo` | 43 | 0.744 / 0.907 | 0.791 / 0.907 | 14 -> 16 |
+  | Beatport drum & bass | 40 | 0.500 / 0.775 | 0.325 / 0.775 | 21 -> 31 |
+  | Beatport 85-92, not drum & bass | 25 | 0.600 / 0.840 | 0.520 / 0.840 | 6 -> 8 |
+  | Beatport hip-hop, downtempo, breaks, dubstep, drum & bass | 279 | 0.796 / 0.885 | 0.763 / 0.885 | 40 -> 52 |
+  | `beatport-tempo`, all | 774 | 0.897 / 0.930 | 0.885 / 0.930 | |
+
+  The thresholds were picked on the 35 Beatport and GiantSteps tracks read at 79-93 BPM (from the 279-track
+  subset and the 43 GiantSteps tracks); GTZAN and hjdb are held out. Results moved little between 0.75 and 0.9
+  balance and 1.5 and 2.5 contrast. Beatport's drum & bass Acc1 drops because 22 of its 40 drum & bass
+  labels are at 84-92: 7 of those now read at 172-179 (the point of the change), so `beatport-tempo` reports
+  "drum & bass read at 160-180 BPM" separately (on Modal only once the bucket's track index is rewritten
+  with `--write-index`, since older indexes don't have the genre). The guard set lost 2 tracks: a hip-hop track listed at 87 and
+  a downtempo track listed at 90, both with a snare on every slow beat. GTZAN gained 5 (blues, country,
+  hip-hop, metal and reggae labeled at 168-180) and lost 2 (blues at 82, country at 86); hjdb gained 2.
+  Measured locally with `bench.tempo_spec` and core's tempo on audio (the `tempo_audio` bench op, the same
+  tempo a card gets).
+- Tried first for that rule: snare-band flux (180-2,500 Hz of the log-mel) at the half beats. Its balance
+  overlapped: kick, bass and vocals in that band made 85-92 BPM hip-hop and downtempo look as even as drum &
+  bass. The drum part's unmixing is what separates them.
+- Still open: 5 of 40 Beatport drum & bass tracks and 2 of 16 fast GiantSteps tracks still read at 86-90.
+  Their snare is half-time too (beat 3 of the fast bar, like a real 87 BPM backbeat) or they fall just short
+  of the thresholds. The 2/3-tempo locks (116 for 174) are unchanged. - Full runs after the change (2026-11-08, local; `bench_scores.json` recorded): `beatport-tempo` 774 tracks
+  Acc1 0.897 -> 0.885, Acc2 0.930 both. Its 9 lost tracks are the 7 drum & bass tracks listed at 85-89 and the
+  same hip-hop and downtempo tracks as in the subset; no other track changed result. `giantsteps-tempo` 0.791 /
+  0.907, hjdb (all 235) 0.932 / 0.949. The BPM calibration fitted on these 1,052 tracks gives nearly the
+  same knots as consts.rs (64%, 84%, 89%, 95%, 96-98% at the same raw scores; held-out Brier 0.085 vs flat
+  0.097), so it was not rewritten: `calibrate --write` also refits the key table, which needs fresh
+  out-of-fold key rows.
+
+## Drum lanes
+
+The drum lanes behind the detected groove (kick, snare, clap, hat, open hat,
+tom, perc; see `engine-rs/src/drums.rs`, and [drums.md](drums.md) for the design,
+what was tried and dropped, and known weaknesses) have their own benchmark:
+
+`$TASTR_DATA` is your dataset folder (local-setup.md (in the Tastr app's docs)).
+
+```
+tastr drum-bench synth                                          # generated loops, every lane
+tastr drum-bench idmt $TASTR_DATA/idmt-smt-drums --limit 20   # quick check while tuning
+tastr drum-bench mdb $TASTR_DATA/mdb-drums --out mdb.json
+tastr drum-bench stemgmd-mix $TASTR_DATA/stemgmd-single-hits
+tastr drum-bench mdb mdb-drums --remote                         # on Modal (docs/cloud.md)
+```
+
+`python -m tastr.engine.bench.drums` takes the same arguments.
+
+- `synth` scores every lane step by step on generated loops: exact, but one synthetic kit.
+- `idmt` is [IDMT-SMT-Drums](https://zenodo.org/records/7544164) (95 loops from real, sampled and
+  techno kits, CC BY-NC-ND): kick, snare and hi-hat only. Snare counts snare or clap hits, hat counts
+  closed or open. It also reports how often the lanes it has no labels for (tom, perc, clap) fire.
+- `mdb` is [MDB Drums](https://github.com/CarlSouthall/MDBDrums) (23 MedleyDB songs, real full mixes,
+  CC BY-NC-SA), from its subclass labels: kick; snare (incl. brushes, ghost notes, flams); hat (closed
+  and pedal); open hat; tom (high, mid, two floor toms; 90 hits); perc (tambourine and side stick; 70
+  hits). `hats` is either hat lane on any hi-hat, as IDMT scores it. Rides and crashes (1,002 hits) have no lane: hat-lane
+  onsets on them aren't counted against the hat, and are reported. No clap. `--drums-only` scores the
+  drum stems instead, to tell mixing losses from classification ones.
+- `stemgmd-mix` builds grooves from the [StemGMD](https://zenodo.org/records/7882857) single hits (10
+  acoustic kits, 9 classes, 10 velocity variants each, CC BY 4.0): 5 grooves x 10 kits x 96 and 124
+  BPM, with toms in fills (alone) and on the kick and snare, open hats, ride and crash. StemGMD has no
+  percussion or clap, so the `perc-layer` groove adds the synthetic cowbell from `bench/synth.py`: that
+  row is optimistic, being the sample perc was tuned on. Labels are exact.
+
+The onset suites match within 50 ms. A label's onsets are the peaks of its lanes above 0.4x the 99.5th
+percentile of that lane family (kick and tom; snare, clap and perc; hat and open hat), so a lane a
+track barely uses can't fire on its own leakage. Tom and perc recall is split by whether a kick or
+snare lands within 30 ms, and the report says where each lane's false positives landed.
+
+Scores on 2026-10-29 (onset F-measure; before is the old three-band split):
+
+| | Kick | Snare | Hat |
+|---|---|---|---|
+| IDMT, before | 0.74 | 0.48 | 0.89 |
+| IDMT, now | 0.96 | 0.94 | 0.90 |
+
+Synth, now: kick 1.00, clap 1.00, hat 0.91, snare 0.75, open hat 0.69, tom
+0.67, perc 0.64.
+
+Real kits, 2026-10-29 (F, with P / R):
+
+| | Kick | Snare | Hats | Open hat | Tom | Perc |
+|---|---|---|---|---|---|---|
+| MDB, full mix | 0.81 | 0.51 (0.72 / 0.39) | 0.65 | 0.24 (0.15 / 0.56) | 0.01 (0.01 / 0.02) | 0.03 (0.01 / 0.11) |
+| MDB, drum stems | 0.96 | 0.60 (0.94 / 0.44) | 0.71 | 0.30 | 0.00 | 0.00 |
+| stemgmd-mix | 0.91 | 0.43 (0.41 / 0.45) | 0.72 | 0.52 (0.37 / 0.84) | 0.02 (0.52 / 0.01) | 0.67 (0.99 / 0.50)* |
+
+\* the synthetic cowbell. Real acoustic toms are almost never found, alone or with a kick or snare.
+Against the lane's own loudest moment instead of its family's ("lenient" in the report) tom recall is
+still 0.09 on stemgmd-mix and 0.16 on the MDB stems: the low part barely moves on a tom, whose attack
+lands in the hat (921 false hats on stemgmd-mix toms) and snare (474) lanes instead. On MDB mixes the
+tom and perc lanes fire mostly on snares. IDMT kits fire tom on 1 in 100 labeled hits, perc on 0.2
+and clap on 0.1. StemGMD's variants span about 19 dB for snares (ghost-note soft) and kicks sit
+about 9 dB above snares, part of why its snare recall is low.
+
+Iterate with `--limit`, run the full set before keeping a change. With `--jobs 4` locally: IDMT 21 s,
+MDB 22 s, stemgmd-mix 27 s (100 grooves), synth 9 s.
+
+## DJ beat grid
+
+`engine-rs/src/grid.rs` (2026-11-21, crate 0.6.0) turns the tracker's beats into a DJ grid for the library API
+(`dj.rs`, `tastr-engine dj`); cards are unchanged. Every dataset with beat labels scores it next to the tracker
+(`tracker_*` and `grid_*` in [What gets scored](#what-gets-scored)).
+
+- **Why:** the tracker's beats sit on 23 ms frames and run early: the onset envelope's 93 ms windows peak before
+  the attack. On the synthetic suite they are 22 ms early; on Ballroom 18 ms. At 70 ms that doesn't show; a
+  DJ grid needs a few ms.
+- **How:** each tracked beat moves to the strongest attack within 35 ms (and a fifth of a beat), found with
+  ln(energy in the next 10 ms / energy in the last 10 ms), on the whole band plus a zero-phase low band (kick),
+  every 8 samples. That ratio rises across the 10 ms before an attack and drops sharply once the attack enters
+  the "before" window, so the attack is where it falls through half its peak. A weighted line fit (rounds that
+  drop attacks 60, 30, 18 and then 12 ms off the line) gives BPM and the first beat.
+- **Anchors:** the attacks are split into lines by dynamic programming, minimising squared error plus
+  6 x jitter² x ln(attacks) per line, at least 16 attacks each; jitter is the spread around lines through each
+  attack's 8 neighbours either side. Hand-played but steady music keeps one line, a drummer who speeds up or an
+  edit gets more. Each boundary sits on the first attack the next line explains better.
+- **Decoders:** a click track encoded as MP3 (with and without the LAME header), AAC/M4A, Vorbis and FLAC gives
+  the same first beat to 0.1 ms whether Symphonia decodes it or ffmpeg does (without a LAME header both keep
+  the 1,105-sample encoder delay, so both read 25 ms late). A test checks the formats agree within 1 ms.
+
+Synthetic suite (12 tracks, exact labels) and the first 60 Ballroom excerpts (`--limit 60`, Modal,
+2026-11-21). F is beat F-measure ignoring the first 5 s; offset is the mean of each track's median signed
+error of the beats matched within 70 ms.
+
+| | Tracker | Grid, one line | Grid, greedy anchors | Grid, penalised anchors (shipped) |
+|---|---|---|---|---|
+| Synthetic F at 20 / 10 ms | 0.272 / 0.005 | | | 0.992 / 0.992 |
+| Synthetic offset | -22.1 ms | | | +1.4 ms |
+| Ballroom F at 70 ms | 0.621 | 0.598 | 0.626 | 0.597 |
+| Ballroom F at 20 ms | 0.302 | 0.411 | 0.458 | 0.421 |
+| Ballroom F at 10 ms | 0.131 | 0.263 | 0.320 | 0.274 |
+| Ballroom offset | -18.3 ms | -2.9 ms | -3.2 ms | -2.1 ms |
+| Ballroom tracks with 1 / 2 / 3+ anchors | | 60 / 0 / 0 | 1 / 9 / 50 | 58 / 2 / 0 |
+
+- The greedy version grew each line while 85% of its attacks stayed within 12 ms and its last 6 didn't sit
+  more than 6 ms to one side. It scored best at 20 ms but gave 50 of 60 thirty-second excerpts three to five
+  anchors: it followed the dancers' band's jitter (median fit 6 ms) rather than real tempo changes, which is not
+  what a DJ grid should do, and it lost 0.26 at 20 ms on a steady 128 BPM track. The penalised split keeps
+  steady tracks on one line and still finds a 120 to 126 BPM change and a 118 to 122 BPM drift in the unit
+  tests.
+- Ballroom is live ballroom recordings, the hard case; `fit_ms` (median 6.2 ms there, under 1 ms on programmed
+  synthetic tracks) says how far a track's attacks sit from its grid.
+- Still open: tracks read at half or double tempo get a grid at that tempo (Chrisanne1-03 at 166 for 84 put
+  its grid on the off-beats). Eight excerpts score 0 for tracker and grid alike, five of them Cafe_Paradiso
+  with the BPM right, which looks like a label offset on that album rather than a beat problem. Full-length
+  tracks, GTZAN (only spectrograms in the bucket, no audio) and electronic music with beat labels are not
+  measured yet.
+
+## Downbeats
+
+`python -m tastr.engine.bench.downbeats <folder> --dataset gtzan [--limit N]`
+scores which beat core picks as bar 1, on labeled beats, from the Beat This!
+spectrogram release. See [rhythm.md](rhythm.md) for the data, scores and
+design notes. Only the original recordings are scored; the release's pitch-shifted
+and time-stretched copies (`<name>/track_ps-3`, `<name>/track_ts12`) are skipped.
+
+## Meter
+
+`python -m tastr.engine.bench.meter <folder> --dataset gtzan [--limit N]`
+(or `tastr spec-bench meter`) scores core's 3/4-or-4/4 guess and its 3-beat
+bar-1 picker on the same files, using tracks whose labeled bars are steadily
+3 or 4 beats long. See [rhythm.md](rhythm.md#meter-34-or-44-2026-10-30).
+
+**Ballroom, held out (2026-10-31).** `tastr bench ballroom ballroom --remote --stages core` on all 698
+excerpts (Rust engine, main, not recorded, 133 s on Modal): BPM within 4% 0.585, with x2 / half 0.841
+(130 read at half, 49 at double); beat F 0.674, downbeat F 0.445. Meter: 4/4 kept on 0.994 of 523, but 3/4
+found on only 0.56 of 175, against 0.86 on GTZAN, where the detector was tuned.
+
+| Style | n | BPM 4% | x2 / half | Beat F | Meter right | Ref vs est median BPM |
+|---|---|---|---|---|---|---|
+| ChaChaCha | 111 | 0.98 | 0.98 | 0.73 | 1.00 | 124 / 124 |
+| Tango | 86 | 0.97 | 0.97 | 0.88 | 1.00 | |
+| Rumba (3 sets) | 98 | 0.83 | 0.92 | 0.71 | 1.00 | |
+| Samba | 86 | 0.67 | 0.71 | 0.65 | 0.99 | |
+| Jive | 60 | 0.53 | 1.00 | 0.66 | 1.00 | 172 / 125 |
+| Quickstep | 82 | 0.00 | 0.93 | 0.55 | 0.98 | 204 / 103 |
+| Viennese Waltz | 65 | 0.31 | 0.71 | 0.68 | 0.80 (3/4) | 180 / 136 |
+| Waltz | 110 | 0.23 | 0.56 | 0.54 | 0.42 (3/4) | 87 / 131 |
+
+- Most of the 4% misses outside the waltzes are the tempo fold: Quickstep (about 200 BPM) is always read
+  at half and Jive (about 172) half the time, which is by design for a DJ range.
+- Slow Waltz is the weak spot: its tempo comes out 1.5x too high (87 to 131, the 3:2 trap), and 3/4 is
+  found on only 42%. Viennese Waltz finds 3/4 more often (80%) but at 3/4 of its tempo.
+- So the 3/4 detector is too conservative on slow waltzes, while 4/4 is nearly never flipped.
+
+## Tempo on spectrograms
+
+`python -m tastr.engine.bench.tempo_spec <folder> --dataset hjdb [--out results.json]`
+runs core's tempo logic on onset envelopes rebuilt from the same release's
+spectrograms and scores it against 60 / the median labeled beat interval, per
+train / val split. See "Tempo notes" for how close it is to the audio path.
+
+## Cue points
+
+The engine suggests DJ cue points (`cues` in the DJ API, `extras["sections.cues"]` on the card;
+[rust-engine.md](rust-engine.md#using-the-engine-as-a-library)). Two benches score them, both within one bar:
+
+- **Rekordbox cues.** The `rekordbox` dataset reads plain hot and memory cues from the collection XML as
+  `Truth.cues`, so `tastr bench rekordbox <xml>` reports the share of those cues with a suggested cue nearby
+  (`cue_recall`) and the share of suggested cues near one of them (`cue_precision`). Any dataset with section
+  labels also gets `cue_section_recall`.
+- **Harmonix section starts.** `tastr spec-bench sections harmonix --limit 60 --remote` ends with a "cue points"
+  line: the share of labeled section starts (not the track's start or end) with a section, phrase, drop or
+  mix-out cue within one labeled bar, and the share of those cues near a labeled start.
+
+### First runs (2026-11-21)
+
+28 tracks with cues from the owner's Rekordbox 7.2.19 export (house, afro house, pop), run locally, and 60
+Harmonix tracks on Modal. 20 of the Rekordbox tracks have 1 to 4 cues that look hand-set; 8 have exactly 8 hot
+cues, which looks like an auto-cue tool's output, so they are shown apart. The owner doesn't trust these cues as
+ground truth, so read them as a sanity check, not a target. 109 of the 112 cues sit on a downbeat; the first
+memory cue is at the first beat in only 3 of 19 tracks, and most memory cues mark mix-out points late in the
+track.
+
+| Version | Rekordbox cues matched (28 / 20 hand / 8 auto) | Suggestions near a cue (28) | Harmonix starts with a cue | Harmonix cues near a start | Cues per track (RB / Harmonix) |
+|---|---|---|---|---|---|
+| v1: start, drop, mix-out, sections snapped to the 4/8-bar grid, at most 8, 8 bars apart | 0.426 / 0.396 / 0.500 | 0.203 | 0.332 | 0.496 | 7.7 / 7.2 |
+| v2 (shipped): a cue at every section start as well, at most 16 | 0.523 / 0.476 / 0.641 | 0.174 | 0.501 | 0.500 | 11.1 / 10.6 |
+
+- **Snapping sections to the phrase grid lost them.** Only half of Harmonix's section starts fall on a 4-bar
+  phrase ([Sections](#sections)), and many Rekordbox misses in v1 were 2 to 3 bars from a section start. Cueing
+  each section start where the sections stage puts it raised both recalls; precision held on Harmonix.
+- **Precision on hand-set tracks says little:** those tracks have 1 or 2 cues, against 11 suggestions.
+- **Tempo errors cost everything:** the one track read at the wrong tempo (97.65 for 120) missed both its cues.
+- **The section starts plus the start cue alone** matched 0.571 of the Rekordbox cues at 11.4 per track in an
+  offline check; v2's drop and mix-out cues sit on the 4-bar grid from the first sound and stand in for a
+  section start within 2 bars, which costs a little recall there.
+
+## Sections
+
+`tastr spec-bench sections <folder> [--limit N] [--remote]` (or `python -m tastr.engine.bench.sections_spec`)
+scores the sections stage's boundaries against the Harmonix Set (912 pop tracks, a few dance) at 0.5 s
+and 3 s, for a grid of settings: seconds per section (the stage asks for duration / this many sections),
+phrase snap in bars, and the cap on the count. Tracks are split in two halves at random (seed 0): pick on
+"tune", read on "check". Harmonix ships mel spectrograms, not audio, so the bench rebuilds the stage's
+per-bar features from them: MFCC from the log-mel, loudness from the summed mel power, and a chroma
+folded from the 80 mel bands between 55 Hz and 2.1 kHz, which is much coarser than the stage's CQT
+chroma. The bar grid is the labeled downbeats, so beat tracking errors don't blur it. Getting the data:
+cloud.md (in the Tastr app's docs).
+
+### Section length (2026-10-30)
+
+Before the audio run, the annotations alone: Harmonix sections are 20.5 s long at the median (IQR
+17.4 to 24.6 s), 10 per track. With perfect placement, the count that `duration / 28` asks for caps the
+3 s F at 0.79 on the check half (20 s: 0.89; tempo-relative divisors were worse, 8 bars 0.87), and
+snapping perfect boundaries to 4-bar phrases drops them to 0.82 (2 bars 0.98, 1 bar 1.0). Only 51% of
+Harmonix boundaries fall on a 4-bar phrase counted from the first downbeat; 86% fall on a downbeat.
+
+Full run on all 912 tracks, commit a13cba7 (382 s on 2 Modal CPUs, plus 85 s loading). F at 3 s / 0.5 s
+and section count bias (estimated minus labeled), check half:
+
+| seconds | phrase bars | cap | F 3 s | F 0.5 s | count bias |
+|---|---|---|---|---|---|
+| 28 | 4 | 12 | 0.477 | 0.302 | -3.08 (current) |
+| 20 | 4 | 12 | 0.530 | 0.341 | -1.01 |
+| 22 | 2 | 12 | 0.557 | 0.369 | -1.14 |
+| 20 | 2 | 12 | 0.571 | 0.378 | -0.47 |
+| 18 | 2 | 12 | 0.577 | 0.381 | +0.09 |
+| 16 | 2 | 12 | 0.581 | 0.383 | +0.49 |
+| 16 | 2 | 16 | 0.581 | 0.383 | +2.02 (best on tune) |
+| 16 | 1 | 12 | 0.559 | 0.368 | +0.69 |
+
+The tune half agrees within 0.02 everywhere. Learnings:
+
+- The 4-bar snap costs about as much as the long sections; 2 bars beats both 4 and 1 at every length.
+- 16 to 18 s per section with a 2-bar snap gains about 0.10 F at 3 s. Raising the cap past 12 adds
+  sections without adding hits.
+- An earlier note said 55 of 912 tracks score 0 at 3 s. Those per-track rows weren't saved, and the
+  count most likely came from the old setting (28 s / 4 bars). At the current setting (18 s / 2 bars, cap 12) a full 912-track pass (2026-10-31, mean F 0.582) has
+  only 4 zeros, 6 at F ≤ 0.1 and 23 at F ≤ 0.2. All 912 mels load and are finite, so there is no data
+  or loading bug. Three of the 4 zeros (0065, 0156, 0278) are slow songs (bars of 3.3 to 4.5 s against a
+  2.0 s median) where the boundaries land about one bar off, just outside the 3 s window; tracks with
+  bars of 2.8 s or more (134) average F 0.538. The fourth (0969) has a 21.5 s intro that the stage
+  splits while the labels start at 21.5 s. Any single constant shift lifts all 4 to F 0.50 to 0.73.
+  A possible next step is scaling the snap or the section length by bar length.
+- A 60-track subset (30 per half) gave the same ranking (current 0.468, 16 s / 2 bars 0.56 on check), so
+  subsets are fine for iterating here.
+- The stage now uses 18 s and 2 bars (sections 0.2.0): within 0.004 of the best F with the count closest
+  to the labels. Harmonix is mostly pop, so it leans away from over-splitting. Re-analyze updates old cards.
