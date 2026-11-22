@@ -32,6 +32,8 @@ const REFINE_SPAN: f64 = 0.025;
 const REFINE_STEP: f64 = 0.0002;
 /// How far (in beats) a tracked beat may sit from the beat or the off-beat for `one_phase`.
 const ONE_PHASE_TOLERANCE: f64 = 0.12;
+/// The fewest beats on each of the two phases for `one_phase` to see a stretch on the off-beat (not a stray beat).
+const ONE_PHASE_MIN_BEATS: usize = 8;
 /// The share of tracked beats that must sit on one of the two phases.
 const ONE_PHASE_SHARE: f64 = 0.9;
 const METER_CUE_SCALES: [(&str, f64); 6] =
@@ -513,10 +515,17 @@ fn one_phase(frames: &[f64], onset: &[f32], n_frames: usize, constant: bool) -> 
         }
     }
     let n = frames.len();
-    if !constant && (((on + off) as f64) < ONE_PHASE_SHARE * n as f64 || on.min(off) == 0) {
+    if !constant && (((on + off) as f64) < ONE_PHASE_SHARE * n as f64 || on.min(off) < ONE_PHASE_MIN_BEATS) {
         return None;
     }
-    let phase = if on >= off { base } else { base + 0.5 };
+    // The grid goes through the beats of the larger group (their own mean phase, not `base`: the two groups
+    // needn't sit exactly half a beat apart, and a grid a frame or two off the beats misleads `align_to_kick`).
+    let centre = if on >= off { base } else { base + 0.5 };
+    let (c, s) = phases
+        .iter()
+        .filter(|&&p| dist(p, centre) <= ONE_PHASE_TOLERANCE || constant && dist(p, centre) < 0.25)
+        .fold((0.0, 0.0), |a, p| (a.0 + libm::cos(tau * p), a.1 + libm::sin(tau * p)));
+    let phase = if c == 0.0 && s == 0.0 { centre } else { (libm::atan2(s, c) / tau).rem_euclid(1.0) };
     Some(even_grid(phase * period, period, n_frames))
 }
 
