@@ -1,8 +1,8 @@
 # tastr-engine
 
 The music analysis engine behind Tastr, in pure Rust. It finds the
-BPM, beats, downbeats, meter, key, song sections and suggested DJ cue points of a track (and, for Tastr's own cards, drum patterns,
-vibe tags and production suggestions). It builds natively and for WebAssembly with the same results, and
+BPM, beats, downbeats, meter, key, energy, vibe tags, song sections and suggested DJ cue points of a track (and, for Tastr's own cards, drum patterns
+and production suggestions). It builds natively and for WebAssembly with the same results, and
 needs no network: everything runs on the caller's machine.
 
 ## Use it from Rust
@@ -18,7 +18,7 @@ tastr-engine = "0.6"
 ```
 
 Each release is also a tag `v<version>` in this repository, so a git dependency pinned to one works too:
-`tastr-engine = { git = "https://github.com/pocketIlmatto/tastr-engine", tag = "v0.6.0" }`. Needs Rust 1.88 or
+`tastr-engine = { git = "https://github.com/pocketIlmatto/tastr-engine", tag = "v0.6.1" }`. Needs Rust 1.88 or
 newer.
 
 ```rust

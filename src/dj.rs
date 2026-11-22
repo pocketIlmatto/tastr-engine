@@ -1,8 +1,9 @@
-//! What a DJ tool needs from a track, and nothing else: BPM, beats, downbeats, meter, key, sections and cue points.
+//! What a DJ tool needs from a track, and nothing else: BPM, beats, downbeats, meter, key, energy, vibe tags,
+//! sections and cue points.
 //!
 //! This is the API for using the engine from other Rust programs (docs/rust-engine.md, "Using the engine as a
-//! library"). It runs only the core and sections stages, so it skips the drum patterns, vibe tags and
-//! suggestions the app's card also has. The answers are the same as the card's for the same audio.
+//! library"). It runs only the core, sections and tags stages, so it skips the drum patterns and suggestions the
+//! app's card also has. The answers are the same as the card's for the same audio.
 //!
 //! ```no_run
 //! let pcm: Vec<f32> = vec![0.0; 44_100 * 2 * 30]; // 30 s of interleaved stereo at 44.1 kHz
@@ -20,7 +21,7 @@ use crate::stages::{self, Ctx};
 use crate::SR;
 
 /// The stages a DJ result needs, in run order.
-const STAGES: [&str; 2] = ["core", "sections"];
+const STAGES: [&str; 3] = ["core", "sections", "tags"];
 
 /// Choices for an analysis: `DjOptions::default()`, then the `with_*` methods for anything else.
 #[derive(Clone, Debug, Default)]
@@ -74,6 +75,12 @@ pub struct DjResult {
     /// The beat grid to a fraction of a millisecond: tempo, first beat, first downbeat and an anchor wherever the
     /// tempo changes (see `grid.rs`). None when there are too few clear attacks.
     pub grid: Option<Grid>,
+    /// How energetic the whole track is, 0 to 1 (loudness, onset rate, brightness and percussiveness; see
+    /// docs/vibes.md). None when the core stage could not measure it.
+    pub energy: Option<f64>,
+    /// Vibe tags ("high energy", "dark", "house tempo", ...) with their scores (0 to 1), high to low; only tags
+    /// scoring at least 0.2 are listed (docs/vibes.md).
+    pub tags: Vec<(String, f64)>,
     /// Stages that failed, as (stage, message). Empty when everything ran.
     pub errors: Vec<(String, String)>,
 }
@@ -150,6 +157,8 @@ fn from_card(card: Card, grid: Option<Grid>) -> DjResult {
         cues: on_grid(card.cues, grid.as_ref()),
         loudness_db: c.loudness_db,
         grid,
+        energy: c.energy,
+        tags: card.tags,
         errors: card.errors,
     }
 }
@@ -190,6 +199,13 @@ impl DjResult {
             .with("meter_set", self.meter_set)
             .with("key", key)
             .with("loudness_db", self.loudness_db)
+            .with("energy", self.energy)
+            .with(
+                "tags",
+                Json::Arr(
+                    self.tags.iter().map(|(t, s)| Json::obj().with("tag", t.clone()).with("score", *s)).collect(),
+                ),
+            )
             .with("beat_times", self.beat_times.clone())
             .with("grid", self.grid.as_ref().map_or(Json::Null, grid_json))
             .with("downbeat_times", self.downbeat_times.clone())
@@ -306,6 +322,11 @@ mod tests {
             r.sections.iter().map(|s| s.start).collect::<Vec<_>>(),
             card.sections.iter().map(|s| s.start).collect::<Vec<_>>()
         );
+        // Energy and vibe tags come from the same stages as the card's, so they match it too.
+        assert!(r.energy.is_some());
+        assert_eq!(r.energy, card.core.energy);
+        assert!(!r.tags.is_empty());
+        assert_eq!(r.tags, card.tags);
     }
 
     #[test]
@@ -413,5 +434,10 @@ mod tests {
         ] {
             assert!(s.contains(k), "{k} missing from {s}");
         }
+        let energy = format!("\"energy\": {:?}", r.energy.unwrap());
+        assert!(s.contains(&energy), "{energy} missing from {s}");
+        let (tag, score) = &r.tags[0];
+        let tag = format!("{{\"tag\": \"{tag}\", \"score\": {score:?}}}");
+        assert!(s.contains(&tag), "{tag} missing from {s}");
     }
 }
