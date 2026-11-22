@@ -95,7 +95,7 @@ and sections. `src/dj.rs` is the API for that (since 0.5.0); [README.md](../READ
 licence notes.
 
 - **Add it** from crates.io (`tastr-engine = "0.6"`), or as a git dependency pinned to a tag: `tastr-engine = { git =
-  "https://github.com/pocketIlmatto/tastr-engine", tag = "v0.6.0" }`.
+  "https://github.com/pocketIlmatto/tastr-engine", tag = "v0.6.1" }`.
   Callers that decode audio themselves (ffmpeg, a DAW) can add `default-features = false` to leave out the
   `decode` feature and Symphonia.
 - **Call it** with interleaved PCM at any rate and channel count, `dj::analyze_pcm(&samples, 44_100, 2,
@@ -116,13 +116,17 @@ licence notes.
   start within 2 bars of them. `phrase` cues mark other phrase starts where the energy changes, at least 8 bars
   from any other cue. In the DJ result they sit on `grid` (each moved to its nearest grid beat); the card has the tracker's times, in `extras["sections.cues"]`; the app doesn't show them. How well
   they match: [bench.md](bench.md#cue-points).
+- **Energy and vibe tags** (since 0.6.1): `energy`, the whole track's energy from 0 to 1, and `tags`, the vibe
+  tags scoring at least 0.2 with their scores, high to low. Both are the card's own (`core.energy`, `tags`; a
+  unit test checks), and [vibes.md](vibes.md) says how they're made and how well they match listeners' labels.
+  Each section already has its own `energy`.
 - **From the command line:** `tastr-engine dj song.mp3` prints the same as JSON.
 - **Limits:** `beat_times` sit on the analysis frame grid (hop 512 at 22,050 Hz, about 23 ms); use `grid` for
   DJ work. Downbeats (and so `first_downbeat`) are right on about two thirds of songs (GTZAN, see
   engine-report.md). The API may still change before 1.0; pin a tag.
 - **Benchmarks** call it through the native library too (`tastr_dj`, `tastr_dj_f32`; `rust.dj_from_file`), so
   `tastr bench` scores the grid on every dataset with beat labels.
-- **Speed:** it runs only the core and sections stages and skips the bass CQT, which only the suggestions read.
+- **Speed:** it runs only the core, sections and tags stages (tags only applies rules to numbers the others made) and skips the bass CQT, which only the suggestions read.
   A 4-minute track took 4.4 s against 5.0 s for the whole card (one core, release build, 2026-11-21); most of
   the time is the shared signals (HPSS, CQT) both need.
 
