@@ -1,0 +1,223 @@
+# Vibe benchmark: grounding danceability, energy and vibe tags
+
+> A method write-up for the engine, kept here because the [engine report](engine-report.md) cites it. The
+> benchmark scripts and `python` commands it names live in the Tastr app, not in this repository.
+
+Danceability, energy and the vibe tags are weighted sums and thresholds that were picked by hand when the
+engine was first written and haven't been tuned since. This benchmark checks them against what listeners
+said about real tracks, and refits the weights where the labels allow it.
+
+| Number | Where | Checked against |
+| --- | --- | --- |
+| danceability = 0.75 percussiveness (/0.5) + 0.25 tempo fit (bell around 135 BPM, width 45); until 2026-10-30 it was 0.55 pulse clarity + 0.25 tempo fit (122 BPM, width 30) + 0.20 percussiveness | `stages/core.py` | MTG-Jamendo danceable, party (fitted, see Results) |
+| energy = 0.35 loudness ((dB+30)/22) + 0.25 onset rate (/6 per s) + 0.20 brightness + 0.20 percussiveness (/0.5) | `stages/core.py` | DEAM arousal; MTG-Jamendo aggressive, energetic, relaxed |
+| mood-like tags: high energy, chill, melancholic, dark, bright, euphoric, danceable, atmospheric | `engine-rs/src/stages/tags.rs` | MTG-Jamendo yes/no moods and mood/theme tags, DEAM valence |
+| descriptive tags: bass-heavy, percussive, swung, dynamic, driving, hypnotic | `engine-rs/src/stages/tags.rs` | no public labels; meant to be set from the spread of your own library |
+| show cut-off 0.20 | `engine-rs/src/stages/tags.rs` (`MIN_SCORE`) | the share of tracks showing a tag that listeners labeled the same way |
+
+The section length target (one section per 28 s) is handled separately, against Harmonix.
+
+## Datasets
+
+| Name | Labels | Audio | License |
+| --- | --- | --- | --- |
+| `mtg-moods`: [MTG-Jamendo](https://github.com/MTG/mtg-jamendo-dataset), [music-classification annotations](https://github.com/MTG/mtg-jamendo-dataset/blob/master/derived/music-classification-annotations/README.md) + mood/theme tags | yes/no for danceable (1,698 yes / 2,759 no), party, aggressive, relaxed, happy, sad, only where all three annotators agreed; 59 uploader mood/theme tags | 100 tar archives of about 1.6 GB (low quality); `tastr fetch` keeps only labeled tracks, cut to the middle 60 s | audio CC per track, metadata CC BY-NC-SA 4.0; non-commercial research only |
+| `deam`: [DEAM](https://cvml.unige.ch/databases/DEAM/) | listener arousal and valence, 1-9, averaged over each clip | 1,802 clips, mostly 45 s, 1.3 GB | CC BY-NC |
+
+Neither may be redistributed for commercial use. They live in the private bucket only; the repo holds
+loaders, results and fitted numbers, never audio or labels.
+
+Caveats:
+
+- Jamendo is mixed genre, not mostly dance music. Your own corrections remain the final check for EDM.
+- Danceability is the noisiest label (the annotators agreed on 44% of tracks), so its clean set is small.
+- Uploader mood tags are sparse: a track without "dark" may still be dark. Those are only scored by ranking.
+- DEAM's audio host isn't reachable from Claude's cloud sessions; Modal and your Mac reach it. The zip names
+  in `tastr/cloud/fetch.py` (`DEAM_audio.zip`, `DEAM_Annotations.zip`) are the ones the download page used;
+  if they move, pass the new URLs to `fetch_deam`.
+
+## Running it
+
+```
+tastr fetch mtg-moods mtg-moods --archives 0-5 --remote   # about 9.4 GB streamed, about 1 GB kept
+tastr fetch deam deam --remote                            # 1.3 GB
+tastr vibe-bench mtg-moods mtg-moods --remote --out mtg.json
+tastr vibe-bench deam deam --remote --out deam.json
+tastr vibe-fit mtg.json deam.json --out fit.json
+```
+
+Without `--remote` the same commands work on a local folder. `fetch` writes the dataset's
+`tastr-index-<dataset>.json`, so remote runs don't walk the bucket. A rerun of `fetch` skips clips already
+there; it reports archives whose checksum didn't match (a cut-off download), and rerunning fills them in.
+
+`vibe-bench` prints, for each measure and the labels it should agree with, the ROC AUC (yes/no labels: the
+chance a "yes" track scores above a "no" one; 0.5 is chance) or Spearman correlation (arousal, valence).
+For tags it also shows how many tracks show the tag at the 0.20 cut-off and what share of them listeners
+labeled yes, next to the base rate.
+
+`vibe-fit` refits danceability and energy as weighted sums of the same inputs, weights non-negative and
+summing to 1 in steps of 0.05, plus the tempo bell's center and width for danceability. It fits on a fixed
+70% of the tracks (split by a hash of the id) and reports both today's and the fitted weights on the other
+30%. A refit only goes into the engine if it wins on the held-out tracks and makes musical sense.
+
+## Results
+
+### 2026-10-30: MTG-Jamendo subset, today's weights
+
+1,567 labeled tracks from archives 00-05, middle 60 s of each, 0 failed (`vibe-bench` on Modal: 23 min wall,
+16 min analysis). DEAM isn't in yet: its server (cvml.unige.ch) timed out from Modal and from a Mac.
+
+| Measure | Label | n | AUC | Shown at 0.20 | Share of shown labeled yes (base rate) |
+| --- | --- | --- | --- | --- | --- |
+| energy | aggressive | 451 | 0.896 | | |
+| energy | relaxed | 342 | 0.120 (ranks relaxed tracks low, as it should) | | |
+| energy | mood: energetic | 1,200 | 0.737 | | |
+| danceability | danceable | 244 | 0.670 | | |
+| danceability | party | 438 | 0.609 | | |
+| danceability | mood: party | 1,200 | 0.797 | | |
+| tag: high energy | aggressive | 451 | 0.885 | 133 | 0.35 (0.11) |
+| tag: chill | relaxed | 342 | 0.647 | 31 | 0.84 (0.38) |
+| tag: melancholic | sad | 333 | 0.692 | 55 | 0.36 (0.12) |
+| tag: euphoric | happy | 364 | 0.647 | 40 | 0.78 (0.29) |
+| tag: bright | happy | 364 | 0.655 | 145 | 0.41 (0.29) |
+| tag: atmospheric | mood: meditative | 1,200 | 0.703 | 845 | 0.05 (0.04) |
+| tag: danceable | danceable | 244 | 0.515 | 7 | 0.57 (0.37) |
+| tag: dark | mood: dark | 1,200 | 0.488 | 488 | 0.05 (0.06) |
+| tag: driving | mood: energetic | 1,200 | 0.488 | 23 | 0.00 (0.06) |
+| tag: hypnotic | mood: meditative | 1,200 | 0.484 | 28 | 0.00 (0.04) |
+
+Reading it:
+
+- Energy already ranks tracks the way listeners do (AUC 0.90 against "aggressive").
+- Danceability is weaker (0.67 against "danceable").
+- High energy, chill, melancholic and euphoric pick out the right tracks well above the base rate.
+- "danceable" almost never shows, because 0.55 danceability is a high bar on this scale.
+- "atmospheric" shows on 70% of tracks, so its cut-off is too low.
+- "dark", "driving" and "hypnotic" do no better than chance against the closest labels. Uploader tags are sparse, though, so this is weak evidence against them.
+
+### 2026-10-30: refit on the same tracks (`vibe-fit`, 70/30 split)
+
+| Measure vs label | Held out | Today | Fitted | Fitted weights |
+| --- | --- | --- | --- | --- |
+| danceability vs danceable | 73 | 0.714 | 0.864 | pulse clarity 0, tempo fit 0.40, percussiveness 0.60; bell 135 +/- 45 |
+| danceability vs party | 128 | 0.613 | 0.818 | pulse clarity 0, tempo fit 0.30, percussiveness 0.70; bell 135 +/- 15 |
+| energy vs aggressive | 136 | 0.838 | 0.909 | loudness 0.60, onset rate 0, brightness 0.25, percussiveness 0.15 |
+| energy vs mood: energetic | 354 | 0.757 | 0.780 | loudness 0.35, onset rate 0.05, brightness 0.50, percussiveness 0.10 |
+
+- Both danceability fits drop pulse clarity and put about two thirds of the weight on percussiveness. They
+  gain about 0.15-0.2 AUC on tracks the fit never saw. The tempo bell's width disagrees between the two
+  labels and the held-out sets are small (73 and 128), so the bell is the least certain part.
+- The energy fits disagree on the second input (brightness vs. loudness), and the gains are small. Today's
+  energy weights are close enough to keep until DEAM's arousal ratings can settle it.
+- None of this is in the engine yet. Jamendo is mixed genre, so check any change on dance music before
+  shipping it.
+
+### 2026-10-30: larger subset, 2,466 tracks
+
+Archives 00-08, plus 137 clips from archive 09 that were stored before Freesound's CDN stalled, 0 failed.
+Archives 09-11 and DEAM are waiting for their servers to come back. The bench took 22 min on Modal.
+Rebuilding the index from the bucket (`remote.fetch("mtg-moods", "mtg-moods", [])`, no audio download) took
+about 15 min, because it checks every labeled path on the mount.
+
+| Measure vs label | n | AUC today |
+| --- | --- | --- |
+| danceability vs danceable | 414 | 0.702 |
+| danceability vs party | 692 | 0.679 |
+| energy vs aggressive | 722 | 0.860 |
+| energy vs mood: energetic | 1,894 | 0.749 |
+| tag: high energy vs aggressive | 722 | 0.852 |
+| tag: melancholic vs sad | 539 | 0.684 |
+| tag: dark vs mood: dark | 1,894 | 0.498 |
+
+The tag findings from the first run all hold.
+
+| Refit vs label | Held out | Today | Fitted | Fitted weights |
+| --- | --- | --- | --- | --- |
+| danceability vs danceable | 128 | 0.741 | 0.828 | pulse clarity 0, tempo fit 0.25, percussiveness 0.75; bell 135 +/- 45 |
+| danceability vs party | 216 | 0.663 | 0.802 | pulse clarity 0, tempo fit 0.30, percussiveness 0.70; bell 135 +/- 15 |
+| energy vs aggressive | 226 | 0.754 | 0.857 | loudness 0.55, onset rate 0, brightness 0.35, percussiveness 0.10 |
+| energy vs mood: energetic | 571 | 0.768 | 0.774 | loudness 0.35, onset rate 0.15, brightness 0.40, percussiveness 0.10 |
+
+With 60% more tracks, the danceability refit barely moved: pulse clarity 0, percussiveness 0.70-0.75, bell
+centered at 135 BPM. It still gains 0.09-0.14 AUC on held-out tracks. Both energy fits now shift weight from
+onset rate to brightness, but only the "aggressive" one gains much.
+
+### 2026-10-30: danceability refit shipped
+
+Danceability is now 0.75 percussiveness + 0.25 tempo fit, with the bell at 135 BPM and width 45. That's the
+"danceable" fit above, and it scored 0.828 held out against 0.741 before. Pulse clarity is still computed
+and still feeds driving, hypnotic and atmospheric. Energy keeps its hand-picked weights until DEAM can
+check them. `vibes.DANCE_WEIGHTS` now holds the shipped weights, so later `vibe-fit` runs compare against
+them.
+
+### 2026-10-31: confirmation run, all 12 archives plus DEAM
+
+MTG-Jamendo: 3,069 labeled tracks from archives 00-11, scored with the shipped danceability. Archives 09-11
+(about 600 tracks) were fetched after the refit, so they're new to it. DEAM: 1,802 clips, from the Kaggle copy
+of the dataset because its own server stayed down. 0 failed on either.
+
+| Measure vs label | n | Before refit | Now |
+| --- | --- | --- | --- |
+| danceability vs danceable | 510 | 0.702 | 0.815 |
+| danceability vs party | 853 | 0.679 | 0.802 |
+| tag: danceable vs danceable | 510 | 0.508 | 0.741 (shown on 145 tracks, 0.72 of them labeled yes; base rate 0.38) |
+| energy vs aggressive | | | 0.848 |
+| energy vs mood: energetic | | | 0.752 |
+
+A second refit gains nothing (held out 0.809 vs 0.811), so the danceability weights are settled.
+
+DEAM (Spearman against listener ratings):
+
+| Measure | Rating | Spearman |
+| --- | --- | --- |
+| energy | arousal | +0.665 |
+| tag: high energy | arousal | +0.484 |
+| tag: bright | valence | +0.483 |
+| tag: euphoric | valence | +0.231 |
+| tag: melancholic | valence | -0.435 |
+| tag: dark | valence | -0.493 |
+
+Energy refits pull in different directions depending on the label:
+
+| Refit vs label | Today (held out) | Fitted | Fitted weights |
+| --- | --- | --- | --- |
+| energy vs aggressive (MTG) | 0.762 | 0.872 | loudness 0.60, onset rate 0, brightness 0.30, percussiveness 0.10 |
+| energy vs mood: energetic (MTG) | 0.778 | 0.784 | loudness 0.40, onset rate 0.20, brightness 0.35, percussiveness 0.05 |
+| energy vs arousal (DEAM) | 0.699 | 0.717 | loudness 0.20, onset rate 0.30, brightness 0.40, percussiveness 0.10 |
+
+Reading it:
+
+- Today's energy already tracks both datasets well. The "aggressive" fit leans on loudness, the DEAM fit on
+  onset rate and brightness, and each gains little on the other's labels. That's a sign of fitting each
+  dataset's quirks, so the hand-picked energy weights stay unless a joint fit beats them on both.
+- "dark" is at chance against MTG's sparse "dark" uploader tag but clearly follows low valence on DEAM, so it
+  works; the MTG label is the weak part.
+- "driving" and "hypnotic" are still at chance, and "atmospheric" still shows on most tracks (1,677 of 2,365
+  MTG tracks with mood tags). Their cut-offs are the next thing to tune, best from the spread of your own
+  library.
+
+### 2026-10-31: pulse clarity was broken until core 0.3.0
+
+Pulse clarity was read after the kick alignment, which moves the beat grid onto the low-band kick, a frame or
+two before the broadband onset peak. So it came out 0 on 86% of MTG-Jamendo, 81% of DEAM and 18 of 20
+Beatport tracks. The fits above that "drop pulse clarity" were fitting a near-constant input, and driving and
+hypnotic were close to chance (AUC about 0.5), while atmospheric got a free +0.4 on nearly every track. Core
+0.3.0 reads it on the tracker's own grid and scales it as (ratio - 1) / 4; on the 20 Beatport tracks it now
+ranges 0.45 to 1. The vibe benches and the tag cut-offs need rerunning on it (Linear TAS-21, TAS-12).
+
+Rerun on core 0.3.0 (Rust engine, 2026-10-31: MTG-Jamendo 3,069 tracks in 568 s, DEAM 1,802 in 646 s on Modal).
+Pulse clarity is never 0 now: MTG p10 / median / p90 0.30 / 0.70 / 1.0, DEAM 0.26 / 0.58 / 0.96. The other tags
+barely moved (high energy vs aggressive 0.837, danceable 0.741; DEAM energy vs arousal +0.665). A vibe-fit puts
+only 0.05-0.20 of danceability's weight on pulse clarity for +0.01 held out, so danceability keeps its weights.
+New cut-offs (tags 0.2.0), with "raw" the rule's score before the cap at 1; shown scores are capped, so the
+shift goes into each rule's constant and MIN_SCORE stays 0.2:
+
+| Tag | New rule | MTG / DEAM shown | Best label check |
+|---|---|---|---|
+| driving | (pulse − 0.73) / 0.35, 115-150 BPM | 17% / 8% (was 1%) | AUC 0.61 vs danceable |
+| hypnotic | (pulse − 0.4) / 0.4 − 3 × contrast − 0.3 | 23% / 14% (was 1%) | AUC 0.59 vs danceable; no label fits |
+| atmospheric | (0.2 − perc) / 0.15 + (0.4 − pulse) − 0.6 | 19% / 16% (was 71%) | AUC 0.77 vs relaxed, precision 0.81 (base 0.40) |
+
+Driving and hypnotic were set from the spread of the owner's own (dance) tracks, aiming at roughly the top quarter
+to third: on her 9 local tracks they show on 3 and 2. No public label really fits them, so review labels
+(`tastr review`) are the real check. Atmospheric shows on none of her dance tracks.

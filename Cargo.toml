@@ -1,0 +1,40 @@
+[package]
+name = "tastr-engine"
+version = "0.6.0"
+edition = "2021"
+license = "MIT"
+description = "Tastr's music analysis engine: BPM, beats, downbeats, meter, key, sections and more, in pure Rust (native and WebAssembly)."
+repository = "https://github.com/pocketIlmatto/tastr-engine"
+homepage = "https://github.com/pocketIlmatto/tastr-engine"
+readme = "README.md"
+keywords = ["audio", "music", "bpm", "key-detection", "beat-tracking"]
+categories = ["multimedia::audio", "science"]
+rust-version = "1.88"
+# Only the code and its notices go to crates.io: no test audio, benchmark data or wasm runner.
+include = ["src/**/*.rs", "Cargo.toml", "Cargo.lock", "README.md", "NOTICE", "LICENSE"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "tastr-engine"
+path = "src/main.rs"
+required-features = ["decode"]
+
+[features]
+default = ["decode"]
+# Audio file decoding (Symphonia, MPL-2.0). Callers that decode themselves can turn it off and use
+# dj::analyze_pcm or analyze().
+decode = ["dep:symphonia"]
+
+[dependencies]
+symphonia = { optional = true, version = "0.6", default-features = false, features = ["wav", "pcm", "mp3", "flac", "ogg", "vorbis", "isomp4", "aac", "id3v1", "id3v2", "ape"] }
+rustfft = "6"
+libm = "0.2"
+miniz_oxide = "0.9"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
