@@ -18,7 +18,7 @@ the Brier score.
 | Tempo | BPM within 4% | 0.488 | 0.767 | GiantSteps Tempo, 43 tracks |
 | Tempo | BPM within 4% | 0.829 | 0.971 | hjdb (jungle / hardcore), 35 held-out tracks |
 | Bar 1 | right phase | 0.43 | 0.64 | GTZAN, 933 songs in 4/4 |
-| DJ grid | beats within 20 ms | 0.302 | 0.421 | Ballroom, first 60 excerpts (library API only) |
+| DJ grid | beats within 20 ms | 0.352 | 0.503 | Ballroom, 698 excerpts (library API only) |
 | 3/4 time | waltzes found | none | 0.86 | GTZAN, 49 songs in 3/4 |
 | Drums | tom onset F | 0.013 | 0.369 | MDB Drums, real mixes (optional model) |
 | Sections | boundary F within 3 s | 0.477 | 0.577 | Harmonix Set, 912 songs |
@@ -132,20 +132,27 @@ nothing measures full tracks from their start. Details: [rhythm.md](rhythm.md).
 The library API (`dj.rs`, for other programs such as DJ tools) adds a beat grid: tempo and first beat to a
 fraction of a millisecond, and an anchor where the tempo really changes. The tracker's beats ran 18-22 ms
 early (its onset windows peak before the attack); the grid moves each beat onto its attack and fits a line.
-Cards are unchanged.
+
+Since core 0.8.0 a steady track keeps one beat phase: the tracker could drift onto the off-beat for minutes of
+a studio track and back, and the grid followed with extra anchors. Core now lays one even grid when nearly
+every beat sits on one phase or half a beat from it, and the grid keeps one line over it. This changes cards'
+beats too. `GridMode::Constant` forces one tempo and phase for any track (like a DJ program's normal mode).
 
 - **Found with:** the synthetic suite and Ballroom at 20 and 10 ms windows (new bench columns).
-- **Checked on:** the first 60 Ballroom excerpts on Modal; synthetic click tracks in five formats for decoder
-  offsets.
+- **Checked on:** all 698 Ballroom excerpts on Modal; synthetic click tracks in five formats for decoder
+  offsets; five full-length tracks against an independent constant grid for the phase.
 
-| Score | Tracker | Grid |
-|---|---|---|
-| Synthetic, beats within 10 ms | 0.005 | 0.992 |
-| Ballroom, beats within 20 ms | 0.302 | 0.421 |
-| Ballroom, beats within 10 ms | 0.131 | 0.274 |
-| Ballroom, mean offset | -18.3 ms | -2.1 ms |
+| Score | Tracker | Grid (core 0.7.0) | Grid (core 0.8.0) |
+|---|---|---|---|
+| Synthetic, beats within 10 ms | 0.005 | 0.929 | 0.992 |
+| Ballroom (698), beats within 20 ms | 0.352 | 0.481 | 0.503 |
+| Ballroom (698), beats within 10 ms | 0.141 | 0.349 | 0.366 |
+| Ballroom (698), mean offset | -17.5 ms | -1.3 ms | -1.1 ms |
+| Ballroom (698), one anchor | | 633 | 678 |
+| Studio tracks, half-beat flips | | 3 of 3 | 0 of 3 |
 
-**Still open:** half/double tempo reads give a grid at that tempo; only 30 s live excerpts measured.
+**Still open:** half/double tempo reads give a grid at that tempo; music with the bass on the off-beat (rumba)
+can get its grid put there; no full-length tracks with beat labels yet.
 Details: [bench.md, DJ beat grid](bench.md#dj-beat-grid).
 
 ## 3/4 time

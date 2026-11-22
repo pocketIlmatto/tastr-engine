@@ -777,6 +777,62 @@ error of the beats matched within 70 ms.
   tracks, GTZAN (only spectrograms in the bucket, no audio) and electronic music with beat labels are not
   measured yet.
 
+### One phase through a steady track (2026-11-22, core 0.8.0)
+
+On full-length studio tracks the tracker could drift onto the off-beat over ten to twenty beats (following an
+off-beat bass or hi-hat), stay there for minutes and drift back. A studio house track at a constant 120 BPM
+had its beats half a beat off from 60 to 120 s and at 300 s, another from 30 to 330 s. The drift failed core's
+even-grid check (every beat within 0.2 of a beat of one line), so the card kept the tracker's beats, and the
+grid fitted an anchor to each flip, some at a wrong tempo (118.46 and 124.45 BPM on 120 and 122 BPM tracks).
+
+- **Core (`one_phase`, core 0.8.0):** when the beats fail the even-grid check, each beat's phase is measured
+  against an even grid at the whole envelope's beat period (`refine_period`). When at least 90% of beats sit
+  within 0.12 of a beat of one phase or of the phase half a beat away, and both phases have beats, the tempo is
+  steady and the tracker slipped: one even grid goes on the phase most beats share, and `align_to_kick` can
+  still move it onto the kick, as for any steady track. A tempo that really changes wanders off both phases
+  and keeps the tracker's beats.
+- **Grid:** over core's even beats, the grid replaces its anchors with one line when they never stray more
+  than 40 ms from it. Tracks whose attacks drift further (live playing that core still called steady) keep
+  their anchors.
+- **`GridMode::Constant`** (`DjOptions::with_grid`, `tastr-engine dj --constant`) skips both tests: one even
+  grid on the majority phase and one grid line, whatever the tracker found, like a DJ program's "normal"
+  analysis. `GridMode::Auto` stays the default. Ballroom scores below are Auto; the bench runner doesn't pass
+  grid options.
+
+Five full-length tracks checked against an independent constant-tempo grid, phase as the median per 30 s
+window (±0.5 is a half-beat flip):
+
+| Track | Before | After (Auto) |
+|---|---|---|
+| Studio house, 120 BPM | flips at 60-120, 180 and 300 s; 10 anchors | within 0.02 beat; 1 anchor, 119.997 BPM |
+| Studio house, 122 BPM | flipped 30-330 s; 7 anchors | within 0.02 beat; 1 anchor, 121.999 BPM |
+| Studio downtempo, 117 BPM | flip at 150 s; 6 anchors | within 0.05 beat; 1 anchor, 116.999 BPM |
+| Live audience recording, 122 BPM | flipped 180-270 s | unchanged (wanders off both phases); Constant holds one phase, but the off-beat |
+| 81 BPM read at 162 | octave disagreement | unchanged |
+
+Benchmarks (Modal, ephemeral runs; "stricter" required at least 8 beats on each phase and put the grid on the
+majority's own mean phase):
+
+| | Before | Shipped | Stricter |
+|---|---|---|---|
+| Synthetic grid F at 20 / 10 ms | 0.983 / 0.929 | 0.992 / 0.992 | 0.992 / 0.992 |
+| Synthetic tracks with 1 / 2 anchors | 1 / 11 | 12 / 0 | 12 / 0 |
+| Ballroom (698) tracker F at 70 / 20 / 10 ms | 0.674 / 0.352 / 0.141 | 0.682 / 0.357 / 0.145 | 0.679 / 0.354 / 0.144 |
+| Ballroom grid F at 70 / 20 / 10 ms | 0.650 / 0.481 / 0.349 | 0.665 / 0.503 / 0.366 | 0.662 / 0.498 / 0.362 |
+| Ballroom grid offset | -1.3 ms | -1.1 ms | -1.1 ms |
+| Ballroom tracks with 1 / 2 / 3+ anchors | 633 / 62 / 3 | 678 / 18 / 2 | 672 / 24 / 2 |
+| Ballroom downbeat F | 0.441 | 0.450 | 0.446 |
+| Ballroom meter right | 0.870 | 0.868 | 0.868 |
+| Ballroom BPM Acc1 / Acc2 | 0.605 / 0.845 | same | same |
+
+- GiantSteps Tempo (first 60), GTZAN downbeats (200) and hjdb tempo scored the same before and after.
+- By style, grid F at 20 ms rose most for Samba (0.512 to 0.561), Quickstep (0.290 to 0.339) and ChaChaCha
+  (0.667 to 0.702). Rumba is the one style that lost (International 0.602 to 0.590): 42 excerpts gained more
+  than 0.05 tracker F and 11 lost it, nearly all of those to 0 and mostly rumba and cha-cha-cha, where the bass
+  plays on the off-beat and `align_to_kick` moves the new even grid onto it.
+- Still open: choosing the phase by the low band misreads music whose bass sits on the off-beat; the live
+  recording above shows Constant can lock onto the off-beat for the same reason.
+
 ## Downbeats
 
 `python -m tastr.engine.bench.downbeats <folder> --dataset gtzan [--limit N]`

@@ -42,7 +42,9 @@ for c in &r.cues {
 
 With the default `decode` feature, `tastr_engine::dj::analyze_file(bytes, &opts)` takes WAV, FLAC, MP3,
 AAC/M4A or Ogg Vorbis file bytes instead. `DjOptions::default().with_beats_per_bar(3)` sets the meter instead of
-detecting it.
+detecting it. `DjOptions::default().with_grid(GridMode::Constant)` keeps one tempo and beat phase for the whole
+track, like a DJ program's normal analysis; the default, `GridMode::Auto`, does that for a steady track and adds an
+anchor where the tempo really changes.
 
 `beat_times` are the beat tracker's, on the engine's analysis frames (about 23 ms steps). For a DJ grid use
 `grid`: each tracked beat moved onto its attack at sample resolution and a line fitted through them, with a

@@ -100,7 +100,8 @@ licence notes.
   `decode` feature and Symphonia.
 - **Call it** with interleaved PCM at any rate and channel count, `dj::analyze_pcm(&samples, 44_100, 2,
   &DjOptions::default())`, or with file bytes, `dj::analyze_file(bytes, &opts)`. Channels are averaged and the
-  audio resampled to 22,050 Hz, as for a card. `DjOptions::default().with_beats_per_bar(3)` sets the meter.
+  audio resampled to 22,050 Hz, as for a card. `DjOptions::default().with_beats_per_bar(3)` sets the meter;
+  `.with_grid(GridMode::Constant)` (since 0.6.1) keeps one tempo and beat phase for the whole track.
 - **What comes back:** `DjResult` with the BPM (two decimals) and how likely it is right, the half and double
   alternatives, every beat and downbeat, the meter, the key (with Camelot and how likely it is right), the
   sections and the loudness, and since 0.6.0 `grid`, the DJ beat grid: BPM to three decimals, the first beat
