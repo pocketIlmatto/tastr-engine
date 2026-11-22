@@ -37,10 +37,23 @@ General > Pull Requests > Allow auto-merge**, and the `AUTOMERGE_TOKEN` secret f
 ## Release
 
 `release.yml` runs on a pushed tag `v<version>` that matches `Cargo.toml`. It builds the `tastr-engine` program
-for macOS (Apple silicon) and Linux (x86-64, ARM), publishes the crate to crates.io, and attaches the archives
-and `SHA256SUMS` to a GitHub release. A crates.io version can't be replaced, only yanked, so a tag publishes
+for macOS (Apple silicon) and Linux (x86-64, ARM), publishes the crate to crates.io, and attaches these to a
+GitHub release, with `SHA256SUMS`:
+
+| File | What it is |
+| --- | --- |
+| `tastr-engine-<version>-<platform>.tar.gz` | The command-line program, with `LICENSE`, `NOTICE` and `README.md` |
+| `libtastr_engine-<version>-linux-x86_64.so`, `-linux-arm64.so`, `-macos-arm64.dylib` | The engine as a library, for programs that load it through its C interface (`src/lib.rs`) |
+| `tastr_engine-<version>.wasm` | The WebAssembly build, for the browser |
+
+Programs that use the engine can download these instead of compiling Rust; pin the SHA-256 of each file you use
+rather than trusting `SHA256SUMS` alone. A crates.io version can't be replaced, only yanked, so a tag publishes
 once: bump `version` in `Cargo.toml` in a pull request first, and tag only with the owner's OK.
-**Actions > release > Run workflow** builds a branch and keeps the archives for a week without releasing.
+
+**Actions > release > Run workflow** builds a branch and keeps the files for a week without releasing. Given an
+existing release's tag (`v0.6.0`), it builds that tag instead and adds the libraries and the WebAssembly file to
+its release, with their sums in its `SHA256SUMS`; the archives already there stay as they are. That is how a
+release made before the libraries were built gets them, without a new tag or a crates.io publish.
 
 ## Dependency updates
 

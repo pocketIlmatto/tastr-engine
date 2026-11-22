@@ -65,6 +65,11 @@ Or build it yourself with `cargo build --release` (the program is `target/releas
 downloaded program may need `xattr -d com.apple.quarantine tastr-engine` before the first run, since it isn't
 signed.
 
+Each release also has the engine as a ready-built library (`libtastr_engine-<version>-<platform>.so` or
+`.dylib`, loaded through the C interface in `src/lib.rs`) and its WebAssembly build
+(`tastr_engine-<version>.wasm`), for programs that load the engine without compiling Rust
+([docs/ci.md](docs/ci.md#release)).
+
 ## Licences
 
 The code is MIT ([LICENSE](LICENSE)). Read
