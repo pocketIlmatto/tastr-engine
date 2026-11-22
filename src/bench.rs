@@ -158,7 +158,7 @@ fn tempo(a: &mut Args) -> Result<Json, String> {
         v
     };
     let (bpm, beats, conf, stability, pulse) =
-        core::tempo_from_envelopes(&onset, &low_flux, sr, n, &mut None, &meter_of, &backbeat_of);
+        core::tempo_from_envelopes(&onset, &low_flux, sr, n, &mut None, &meter_of, &backbeat_of, false);
     Ok(Json::obj()
         .with("bpm", bpm)
         .with("confidence", conf)
@@ -184,8 +184,16 @@ fn tempo_audio(a: &mut Args) -> Result<Json, String> {
         seen.set(Some(v));
         v
     };
-    let (bpm, beats, conf, _, _) =
-        core::tempo_from_envelopes(&ctx.onset, &ctx.low_flux, ctx.sr, n_frames, &mut None, &meter_of, &backbeat_of);
+    let (bpm, beats, conf, _, _) = core::tempo_from_envelopes(
+        &ctx.onset,
+        &ctx.low_flux,
+        ctx.sr,
+        n_frames,
+        &mut None,
+        &meter_of,
+        &backbeat_of,
+        false,
+    );
     Ok(Json::obj()
         .with("bpm", bpm)
         .with("confidence", conf)

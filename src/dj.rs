@@ -16,6 +16,7 @@
 use crate::card::{Card, Key, Section};
 pub use crate::cues::Cue;
 use crate::grid::Grid;
+pub use crate::grid::GridMode;
 use crate::json::Json;
 use crate::stages::{self, Ctx};
 use crate::SR;
@@ -29,9 +30,18 @@ const STAGES: [&str; 3] = ["core", "sections", "tags"];
 pub struct DjOptions {
     /// 3 or 4 to set the meter instead of detecting it. Other values are ignored.
     pub beats_per_bar: Option<i64>,
+    /// `GridMode::Auto` (one tempo for a steady track, anchors where the tempo changes) or `GridMode::Constant`
+    /// (one tempo and beat phase for the whole track).
+    pub grid: GridMode,
 }
 
 impl DjOptions {
+    /// Choose how the beats and grid treat the tempo (`GridMode`).
+    pub fn with_grid(mut self, grid: GridMode) -> DjOptions {
+        self.grid = grid;
+        self
+    }
+
     /// Set the meter (3 or 4) instead of detecting it.
     pub fn with_beats_per_bar(mut self, beats_per_bar: i64) -> DjOptions {
         self.beats_per_bar = Some(beats_per_bar);
@@ -115,9 +125,10 @@ pub fn analyze_file(bytes: Vec<u8>, opts: &DjOptions) -> Result<DjResult, String
 /// Analyze mono audio already at the engine's rate (`tastr_engine::SR`, 22,050 Hz).
 pub fn analyze_mono(y: Vec<f32>, opts: &DjOptions) -> DjResult {
     let mut ctx = Ctx::with_bass(y, opts.beats_per_bar, false);
+    ctx.grid_mode = opts.grid;
     let card = stages::run_only(&mut ctx, &STAGES);
     let c = &card.core;
-    let grid = crate::grid::fit(&ctx.y, ctx.sr, &c.beat_times, &c.downbeat_times, c.beats_per_bar);
+    let grid = crate::grid::fit(&ctx.y, ctx.sr, &c.beat_times, &c.downbeat_times, c.beats_per_bar, opts.grid);
     from_card(card, grid)
 }
 
