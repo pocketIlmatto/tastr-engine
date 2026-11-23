@@ -21,8 +21,8 @@ separate repository and pins one commit of this one. Only engine code, its docs 
   test to get a green run.
 - Never commit secrets, keys, tokens or real people's emails. When you add, remove or rename a secret, update
   [docs/ci.md](docs/ci.md#secrets) in the same change.
-- Don't merge, tag, publish to crates.io or change repository settings. Say in the pull request what the owner
-  needs to do.
+- Don't merge, tag, start a release (Run workflow with a version), publish to crates.io or change repository
+  settings. Say in the pull request what the owner needs to do.
 
 ## Engine rules
 
