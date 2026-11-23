@@ -56,8 +56,9 @@ the engine measures, and how well, is in the
 ## From the command line
 
 Download the program for macOS (Apple silicon) or Linux (x86-64, ARM) from the repository's
-[releases](https://github.com/pocketIlmatto/tastr-engine/releases) (tags `v*`), check it against `SHA256SUMS`,
-unpack it and run:
+[releases](https://github.com/pocketIlmatto/tastr-engine/releases) (tags `v*`), check it against `SHA256SUMS`
+(or with `gh attestation verify <file> --repo pocketIlmatto/tastr-engine`, which checks it was built here), unpack it
+and run:
 
 ```sh
 ./tastr-engine dj song.mp3 > song.json

@@ -36,9 +36,8 @@ General > Pull Requests > Allow auto-merge**, and the `AUTOMERGE_TOKEN` secret f
 
 ## Release
 
-`release.yml` runs on a pushed tag `v<version>` that matches `Cargo.toml`. It builds the `tastr-engine` program
-for macOS (Apple silicon) and Linux (x86-64, ARM), publishes the crate to crates.io, and attaches these to a
-GitHub release, with `SHA256SUMS`:
+`release.yml` builds the `tastr-engine` program for macOS (Apple silicon) and Linux (x86-64, ARM), publishes the
+crate to crates.io, and attaches these to a GitHub release, with `SHA256SUMS`:
 
 | File | What it is |
 | --- | --- |
@@ -47,13 +46,45 @@ GitHub release, with `SHA256SUMS`:
 | `tastr_engine-<version>.wasm` | The WebAssembly build, for the browser |
 
 Programs that use the engine can download these instead of compiling Rust; pin the SHA-256 of each file you use
-rather than trusting `SHA256SUMS` alone. A crates.io version can't be replaced, only yanked, so a tag publishes
-once: bump `version` in `Cargo.toml` in a pull request first, and tag only with the owner's OK.
+rather than trusting `SHA256SUMS` alone. Every file also has a signed build provenance attestation, so anyone can
+check that this repository's release workflow built it, and from which commit:
 
-**Actions > release > Run workflow** builds a branch and keeps the files for a week without releasing. Given an
-existing release's tag (`v0.6.0`), it builds that tag instead and adds the libraries and the WebAssembly file to
-its release, with their sums in its `SHA256SUMS`; the archives already there stay as they are. That is how a
-release made before the libraries were built gets them, without a new tag or a crates.io publish.
+```sh
+gh attestation verify tastr-engine-0.6.2-linux-x86_64.tar.gz --repo pocketIlmatto/tastr-engine
+```
+
+### Making a release
+
+A crates.io version can't be replaced, only yanked, so a version publishes once, and only with the owner's OK.
+
+1. In a pull request, bump `version` in `Cargo.toml` and add a `## <version>` section to `CHANGELOG.md`. That
+   section becomes the release notes.
+2. After it merges, start the release either way:
+   - **Actions > release > Run workflow** on `main` with the version (`0.6.2`). The workflow makes the tag itself,
+     so nobody needs to push one.
+   - Or push a tag `v0.6.2` on that commit of `main`.
+3. `prepare` checks that the version matches `Cargo.toml`, that the commit is on `main`, that the tag doesn't
+   exist yet (Run workflow only), that `CHANGELOG.md` has the section and that crates.io doesn't have the version.
+   Then the builds and tests run on every platform.
+4. `publish` waits in the `release` environment until the owner approves it (**Review deployments** on the run).
+   It publishes with crates.io trusted publishing: no stored token, just a short-lived one that crates.io gives this
+   job after checking GitHub's OIDC login for this repository, `release.yml` and the `release` environment.
+5. `release` signs the attestations, makes the tag if it doesn't exist (on the commit that was built), and
+   creates the GitHub release with the files and the changelog section.
+
+If `release` fails after `publish` succeeded, **Re-run failed jobs**: the crate is already out, and the release
+step only needs the files. **Run workflow** without a version builds the chosen branch and keeps the files as a
+workflow artifact for a week, with no release.
+
+### Settings the owner keeps
+
+- crates.io, crate **Settings > Trusted Publishing**: a GitHub publisher with owner `pocketIlmatto`, repository
+  `tastr-engine`, workflow `release.yml`, environment `release`; and **Require trusted publishing for all new
+  versions** turned on, so an API token can't publish.
+- GitHub **Settings > Environments > release**: **Required reviewers** the owner, and **Deployment branches and
+  tags** limited to `main` and tags `v*`.
+- Optional: **Settings > General > Releases > Enable release immutability**, so a published release's tag and files
+  can't change.
 
 ## Dependency updates
 
@@ -63,9 +94,8 @@ Dependabot opens one grouped pull request a month for Cargo packages and one for
 ## Secrets
 
 Repository **Settings > Secrets and variables > Actions**. Nothing else is needed: this repository deploys
-nothing.
+nothing, and crates.io publishing uses trusted publishing rather than a token ([Release](#release)).
 
 | Secret | Used by | Made at | Renew |
 | --- | --- | --- | --- |
-| `CARGO_REGISTRY_TOKEN` | `release.yml` | crates.io **Account Settings > API Tokens**, scope `publish-update` (and `publish-new` for the first release), limited to the crate `tastr-engine` | New token, replace the secret, revoke the old |
 | `AUTOMERGE_TOKEN` (optional) | `automerge.yml` | GitHub **Settings > Developer settings > Fine-grained tokens**, owner's account, this repository only, **Contents**, **Pull requests** and **Workflows**: Read and write | New token, replace the secret, revoke the old |
